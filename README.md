@@ -117,9 +117,3 @@ Chỉnh sửa file `include/config.h`:
 #define WAVELET_THRESHOLD_MULTIPLIER 1.5f
 ```
 
-## TODO / Các bước tiếp theo
-
-- [ ] Build và test trên phần cứng thực tế
-- [ ] Điều chỉnh ngưỡng wavelet nếu cần
-- [ ] Tối ưu Q factor của notch filter
-- [ ] Thêm tính năng ghi dữ liệu vào SD card (nếu cần)
