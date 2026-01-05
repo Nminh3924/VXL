@@ -1,272 +1,363 @@
-#include <Wire.h>
+/**
+ * ESP32 Physiological Signal Acquisition System
+ *
+ * Sensors:
+ * - AD8232 (ECG) - 1000Hz sampling
+ * - MAX30102 (PPG) - Heart rate and SpO2
+ * - INMP441 (Audio) - 16kHz I2S microphone
+ *
+ * Signal Processing:
+ * - DC Blocker
+ * - Notch filters (50Hz, 100Hz)
+ * - Bandpass filter (1-100Hz)
+ * - Haar Wavelet denoising
+ *
+ * Output: Teleplot compatible format
+ */
+
 #include "MAX30105.h"
 #include "spo2_algorithm.h"
+#include <Arduino.h>
+#include <Wire.h>
 
+
+#include "config.h"
+#include "filters.h"
+#include "inmp441.h"
+#include "wavelet.h"
+
+
+// ============================================================================
+// GLOBAL OBJECTS
+// ============================================================================
 MAX30105 particleSensor;
+INMP441 microphone;
 
+// Filter instances
+SignalFilter ecgFilter;
+SignalFilter ppgFilter;
+AudioFilter audioFilter;
 
-const int AD8232_OUTPUT = 36; 
-const int AD8232_LO_PLUS = 25;
-const int AD8232_LO_MINUS = 26;
-const int I2C_SDA = 21;
-const int I2C_SCL = 22;
+// Wavelet denoiser instances
+RealTimeWaveletDenoiser ecgWavelet;
+RealTimeWaveletDenoiser ppgWavelet;
 
-class SimpleECGFilter {
-private:
+// ============================================================================
+// TIMING VARIABLES
+// ============================================================================
+hw_timer_t *ecgTimer = NULL;
+volatile bool ecgSampleReady = false;
+volatile uint32_t ecgTimestamp = 0;
 
-  float dcBlocker_x1, dcBlocker_y1;
-  const float DC_ALPHA = 0.995; 
-  
+unsigned long lastDisplayTime = 0;
+unsigned long lastAudioTime = 0;
+const unsigned long AUDIO_INTERVAL_US = 1000000 / AUDIO_SAMPLE_RATE; // ~62.5us
 
-  static const int MA_SIZE = 3;
-  float maBuffer[MA_SIZE];
-  int maIndex;
-  
+// ============================================================================
+// DATA VARIABLES
+// ============================================================================
+// ECG
+volatile int rawECG = 0;
+float filteredECG = 0;
+float waveletECG = 0;
 
-  float notch_x1, notch_x2, notch_y1, notch_y2;
-  float b0_n, b1_n, b2_n, a1_n, a2_n;
-  
-  void calculateNotchCoeffs() {
-    float fs = 250.0;
-    float f0 = 50.0; 
-    float Q = 10.0; 
-    
-    float w0 = 2.0 * PI * f0 / fs;
-    float alpha = sin(w0) / (2.0 * Q);
-    float a0 = 1.0 + alpha;
-    
-    b0_n = 1.0 / a0;
-    b1_n = -2.0 * cos(w0) / a0;
-    b2_n = 1.0 / a0;
-    a1_n = -2.0 * cos(w0) / a0;
-    a2_n = (1.0 - alpha) / a0;
-  }
-  
-public:
-  SimpleECGFilter() {
-    dcBlocker_x1 = dcBlocker_y1 = 0;
-    notch_x1 = notch_x2 = notch_y1 = notch_y2 = 0;
-    maIndex = 0;
-    for(int i = 0; i < MA_SIZE; i++) maBuffer[i] = 0;
-    calculateNotchCoeffs();
-  }
-  
-  float filter(int rawValue) {
-    float x = (float)rawValue;
-    
-    // DC Blocker (loại bỏ offset, giữ nguyên sóng, t đ biết nó có tác dụng không nhưng trong bài báo EEG nó dùng)
-    float y_dc = x - dcBlocker_x1 + DC_ALPHA * dcBlocker_y1;
-    dcBlocker_x1 = x;
-    dcBlocker_y1 = y_dc;
-    
-    // Notch 50Hz (loại nhiễu điện, giữ sóng ECG)
-    float y_notch = b0_n * y_dc + b1_n * notch_x1 + b2_n * notch_x2
-                    - a1_n * notch_y1 - a2_n * notch_y2;
-    notch_x2 = notch_x1;
-    notch_x1 = y_dc;
-    notch_y2 = notch_y1;
-    notch_y1 = y_notch;
-    
-    //Moving Average nhẹ (làm mượt chút, t mà cho mạnh khả năng nó ra đường thẳng =)))
-    maBuffer[maIndex] = y_notch;
-    maIndex = (maIndex + 1) % MA_SIZE;
-    
-    float sum = 0;
-    for(int i = 0; i < MA_SIZE; i++) sum += maBuffer[i];
-    float result = sum / MA_SIZE;
-    
-    if (isnan(result) || isinf(result)) return 0;
-    
-    return result;
-  }
-};
-
-SimpleECGFilter ecgFilter;
-
-// BIẾN CHO MAX30102
+// PPG
 uint32_t irBuffer[100];
 uint32_t redBuffer[100];
 int32_t bufferLength = 100;
-int32_t spo2;
+int32_t spo2Value;
 int8_t validSPO2;
-int32_t heartRate;
+int32_t heartRateValue;
 int8_t validHeartRate;
 
 float filteredHeartRate = 0;
 float filteredSpO2 = 0;
-const float SMOOTHING_FACTOR = 0.15;
-
-// BIẾN TIMING 
-unsigned long lastECGTime = 0;
-unsigned long lastDisplayTime = 0;
-const unsigned long ECG_INTERVAL = 4;
-const unsigned long DISPLAY_INTERVAL = 1000;
+const float SMOOTHING_FACTOR = 0.15f;
 
 bool fingerDetected = false;
 int noFingerCount = 0;
 
-void readECG();
-void readSpO2AndHeartRate();
-void setupMAX30105();
+// PPG raw for waveform
+long rawPPG_IR = 0;
+float filteredPPG = 0;
+float waveletPPG = 0;
 
+// Audio
+int16_t rawAudio = 0;
+float filteredAudio = 0;
+
+// Output decimation counter (to avoid Serial overflow)
+int outputCounter = 0;
+
+// ============================================================================
+// TIMER ISR - 1000Hz sampling for ECG
+// ============================================================================
+void IRAM_ATTR onEcgTimer() {
+  rawECG = analogRead(AD8232_OUTPUT_PIN);
+  ecgTimestamp = micros();
+  ecgSampleReady = true;
+}
+
+// ============================================================================
+// SETUP
+// ============================================================================
 void setup() {
-  Serial.begin(115200);
-  
-  // Cấu hình ADC cho ESP32
+  Serial.begin(SERIAL_BAUD_RATE);
+  delay(100);
+
+  Serial.println("\n========================================");
+  Serial.println("ESP32 Physiological Signal Acquisition");
+  Serial.println("========================================");
+
+  // Configure ADC
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
-  
-  // Set chân ADC về INPUT (quan trọng!)
-  pinMode(AD8232_OUTPUT, INPUT);
-  pinMode(AD8232_LO_PLUS, INPUT);
-  pinMode(AD8232_LO_MINUS, INPUT);
-  
-  Wire.begin(I2C_SDA, I2C_SCL);
-  setupMAX30105();
-  
-  
-  // Test ADC ngay lập tức
-  delay(500);
-  for(int i = 0; i < 10; i++) {
-    int raw = analogRead(AD8232_OUTPUT);
-    Serial.println(raw);
-    delay(100);
-  }
-  
-  delay(1000);
-}
 
-void setupMAX30105() {
+  // Configure ECG pins
+  pinMode(AD8232_OUTPUT_PIN, INPUT);
+  pinMode(AD8232_LO_PLUS_PIN, INPUT);
+  pinMode(AD8232_LO_MINUS_PIN, INPUT);
+
+  // Initialize filters
+  ecgFilter.init(ECG_SAMPLE_RATE);
+  ppgFilter.init(PPG_SAMPLE_RATE);
+  audioFilter.init(AUDIO_SAMPLE_RATE);
+
+  Serial.println("[OK] Filters initialized");
+
+  // Initialize I2C for MAX30102
+  Wire.begin(MAX30102_SDA_PIN, MAX30102_SCL_PIN);
+
+  // Initialize MAX30102
   if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
-    Serial.println("ERROR: MAX30105 not found!");
-    while (1);
+    Serial.println("[ERROR] MAX30102 not found!");
+  } else {
+    particleSensor.setup(MAX30102_LED_BRIGHTNESS, MAX30102_SAMPLE_AVERAGE,
+                         MAX30102_LED_MODE, MAX30102_SAMPLE_RATE,
+                         MAX30102_PULSE_WIDTH, MAX30102_ADC_RANGE);
+    particleSensor.setPulseAmplitudeRed(0x0A);
+    particleSensor.setPulseAmplitudeGreen(0);
+    Serial.println("[OK] MAX30102 initialized");
   }
-  
-  byte ledBrightness = 60;
-  byte sampleAverage = 4;
-  byte ledMode = 2;
-  byte sampleRate = 100;
-  int pulseWidth = 411;
-  int adcRange = 4096;
-  
-  particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange);
-  particleSensor.setPulseAmplitudeRed(0x0A);
-  particleSensor.setPulseAmplitudeGreen(0);
+
+  // Initialize INMP441
+  if (!microphone.begin()) {
+    Serial.println("[WARNING] INMP441 not initialized");
+  } else {
+    Serial.println("[OK] INMP441 initialized");
+  }
+
+  // Setup hardware timer for ECG (1000Hz)
+  ecgTimer = timerBegin(0, 80, true); // 80 prescaler = 1MHz
+  timerAttachInterrupt(ecgTimer, &onEcgTimer, true);
+  timerAlarmWrite(ecgTimer, ECG_SAMPLE_INTERVAL_US, true); // 1000us = 1kHz
+  timerAlarmEnable(ecgTimer);
+
+  Serial.println("[OK] Timer started at 1000Hz");
+  Serial.println("========================================\n");
+
+  delay(500);
 }
 
-void loop() {
-  unsigned long currentTime = millis();
-  
-  if (currentTime - lastECGTime >= ECG_INTERVAL) {
-    lastECGTime = currentTime;
-    readECG();
-  }
-  
-  readSpO2AndHeartRate();
-  
-  if (currentTime - lastDisplayTime >= DISPLAY_INTERVAL) {
-    lastDisplayTime = currentTime;
-    
-    if (fingerDetected) {
-      Serial.print(">heartrate:");
-      Serial.println(filteredHeartRate, 1);
-      Serial.print(">spo2:");
-      Serial.println(filteredSpO2, 1);
-    } else {
-      Serial.println(">heartrate:0");
-      Serial.println(">spo2:0");
-    }
-  }
-}
+// ============================================================================
+// ECG PROCESSING
+// ============================================================================
+void processECG() {
+  if (!ecgSampleReady)
+    return;
+  ecgSampleReady = false;
 
-void readECG() {
-  // Kiểm tra lead-off
-  bool loPlus = digitalRead(AD8232_LO_PLUS);
-  bool loMinus = digitalRead(AD8232_LO_MINUS);
-  
-  // Debug lead-off status
-  static unsigned long lastDebug = 0;
-  if (millis() - lastDebug > 2000) {
-    Serial.print("Lead-Off Status: LO+=");
-    Serial.print(loPlus);
-    Serial.print(" LO-=");
-    Serial.println(loMinus);
-    lastDebug = millis();
-  }
-  
+  // Check lead-off
+  bool loPlus = digitalRead(AD8232_LO_PLUS_PIN);
+  bool loMinus = digitalRead(AD8232_LO_MINUS_PIN);
+
   if (loPlus == 1 || loMinus == 1) {
-    Serial.println(">ecg:0");
-    Serial.println(">ecg_raw:0");
+    // Lead off - output zeros
+    if (outputCounter % SERIAL_OUTPUT_DECIMATION == 0) {
+      Serial.println(">ecg_raw:0");
+      Serial.println(">ecg_filtered:0");
+      Serial.println(">ecg_wavelet:0");
+    }
     return;
   }
-  
-  // Đọc tín hiệu RAW
-  int rawECG = analogRead(AD8232_OUTPUT);
-  
-  // Kiểm tra nếu ADC bị treo ở giá trị MAX hoặc MIN
-  if (rawECG >= 4090 || rawECG <= 5) {
-    Serial.print("WARNING: ADC stuck at ");
+
+  // Apply filters
+  float rawFloat = (float)rawECG;
+  filteredECG = ecgFilter.process(rawFloat);
+  waveletECG = ecgWavelet.process(filteredECG);
+
+  // Output (decimated to avoid Serial overflow)
+  if (outputCounter % SERIAL_OUTPUT_DECIMATION == 0) {
+    Serial.print(">ecg_raw:");
     Serial.println(rawECG);
+
+    Serial.print(">ecg_filtered:");
+    Serial.println(filteredECG, 2);
+
+    Serial.print(">ecg_wavelet:");
+    Serial.println(waveletECG, 2);
   }
-  
-  // Áp dụng bộ lọc
-  float filteredECG = ecgFilter.filter(rawECG);
-  
-  // Gửi dữ liệu
-  Serial.print(">ecg:");
-  Serial.println(filteredECG, 1);
-  
-  Serial.print(">ecg_raw:");
-  Serial.println(rawECG);
 }
 
-void readSpO2AndHeartRate() {
+// ============================================================================
+// PPG PROCESSING (SpO2 and Heart Rate)
+// ============================================================================
+void processPPG() {
   static int sampleCount = 0;
   static bool isCollecting = false;
-  
+  static unsigned long lastPPGSample = 0;
+
+  // Rate limit PPG sampling
+  if (micros() - lastPPGSample < PPG_SAMPLE_INTERVAL_US)
+    return;
+  lastPPGSample = micros();
+
   long irValue = particleSensor.getIR();
-  
+  long redValue = particleSensor.getRed();
+
+  // Store raw PPG for waveform display
+  rawPPG_IR = irValue;
+
+  // Apply filters to IR signal for waveform
+  float irFloat = (float)(irValue >> 4); // Scale down for filter
+  filteredPPG = ppgFilter.process(irFloat);
+  waveletPPG = ppgWavelet.process(filteredPPG);
+
+  // Output PPG waveform (decimated)
+  if (outputCounter % SERIAL_OUTPUT_DECIMATION == 0) {
+    Serial.print(">ppg_ir_raw:");
+    Serial.println(irValue);
+
+    Serial.print(">ppg_ir_filtered:");
+    Serial.println(filteredPPG, 2);
+
+    Serial.print(">ppg_ir_wavelet:");
+    Serial.println(waveletPPG, 2);
+  }
+
+  // Finger detection
   if (irValue < 50000) {
     fingerDetected = false;
     noFingerCount++;
-    
+
     if (noFingerCount > 10) {
       isCollecting = false;
       sampleCount = 0;
     }
     return;
   }
-  
+
   fingerDetected = true;
   noFingerCount = 0;
-  
+
+  // Collect samples for SpO2/HR calculation
   if (!isCollecting) {
     sampleCount = 0;
     isCollecting = true;
   }
-  
+
   if (sampleCount < bufferLength) {
-    redBuffer[sampleCount] = particleSensor.getRed();
-    irBuffer[sampleCount] = particleSensor.getIR();
+    redBuffer[sampleCount] = redValue;
+    irBuffer[sampleCount] = irValue;
     sampleCount++;
   } else {
-    maxim_heart_rate_and_oxygen_saturation(
-      irBuffer, bufferLength, redBuffer, 
-      &spo2, &validSPO2, &heartRate, &validHeartRate
-    );
-    
-    if (validHeartRate == 1 && heartRate > 40 && heartRate < 200) {
-      filteredHeartRate = filteredHeartRate * (1 - SMOOTHING_FACTOR) + heartRate * SMOOTHING_FACTOR;
+    // Calculate SpO2 and Heart Rate
+    maxim_heart_rate_and_oxygen_saturation(irBuffer, bufferLength, redBuffer,
+                                           &spo2Value, &validSPO2,
+                                           &heartRateValue, &validHeartRate);
+
+    if (validHeartRate == 1 && heartRateValue > 40 && heartRateValue < 200) {
+      filteredHeartRate = filteredHeartRate * (1 - SMOOTHING_FACTOR) +
+                          heartRateValue * SMOOTHING_FACTOR;
     }
-    
-    if (validSPO2 == 1 && spo2 > 70 && spo2 <= 100) {
-      filteredSpO2 = filteredSpO2 * (1 - SMOOTHING_FACTOR) + spo2 * SMOOTHING_FACTOR;
+
+    if (validSPO2 == 1 && spo2Value > 70 && spo2Value <= 100) {
+      filteredSpO2 =
+          filteredSpO2 * (1 - SMOOTHING_FACTOR) + spo2Value * SMOOTHING_FACTOR;
     }
-    
+
+    // Shift buffer
     for (int i = 25; i < bufferLength; i++) {
       redBuffer[i - 25] = redBuffer[i];
       irBuffer[i - 25] = irBuffer[i];
     }
     sampleCount = 75;
   }
+}
+
+// ============================================================================
+// AUDIO PROCESSING
+// ============================================================================
+void processAudio() {
+  if (!microphone.isInitialized())
+    return;
+
+  // Read audio sample
+  rawAudio = microphone.readSample();
+
+  // Apply filter
+  filteredAudio = audioFilter.process((float)rawAudio);
+
+  // Output (heavily decimated for audio due to high sample rate)
+  static int audioOutputCounter = 0;
+  audioOutputCounter++;
+
+  if (audioOutputCounter >= 160) { // Output at ~100Hz for visualization
+    audioOutputCounter = 0;
+
+    Serial.print(">audio_raw:");
+    Serial.println(rawAudio);
+
+    Serial.print(">audio_filtered:");
+    Serial.println(filteredAudio, 1);
+  }
+}
+
+// ============================================================================
+// DISPLAY HR/SPO2 VALUES
+// ============================================================================
+void displayValues() {
+  unsigned long currentTime = millis();
+
+  if (currentTime - lastDisplayTime >= DISPLAY_INTERVAL_MS) {
+    lastDisplayTime = currentTime;
+
+    if (fingerDetected) {
+      Serial.print(">heartrate:");
+      Serial.println(filteredHeartRate, 1);
+
+      Serial.print(">spo2:");
+      Serial.println(filteredSpO2, 1);
+    } else {
+      Serial.println(">heartrate:0");
+      Serial.println(">spo2:0");
+    }
+
+    // Debug info
+    Serial.print(">finger_detected:");
+    Serial.println(fingerDetected ? 1 : 0);
+  }
+}
+
+// ============================================================================
+// MAIN LOOP
+// ============================================================================
+void loop() {
+  // Process ECG (timer interrupt driven)
+  processECG();
+
+  // Process PPG
+  processPPG();
+
+  // Process Audio (in main loop for simplicity)
+  // Note: For better performance, consider using I2S interrupt
+  processAudio();
+
+  // Display HR/SpO2 values periodically
+  displayValues();
+
+  // Increment output counter
+  outputCounter++;
+  if (outputCounter >= 10000)
+    outputCounter = 0;
 }
