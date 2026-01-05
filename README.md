@@ -80,7 +80,7 @@ Hoặc sử dụng **Teleplot** extension trong VSCode để vẽ biểu đồ r
 
 ### 3. Teleplot Setup
 1. Cài extension "Teleplot" trong VSCode
-2. Baud rate: **500000**
+2. Baud rate: **115200**
 3. Kết nối ESP32 và mở Teleplot
 4. Các kênh sẽ tự động hiển thị
 

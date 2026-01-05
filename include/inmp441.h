@@ -13,7 +13,6 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
 
-
 class INMP441 {
 private:
   bool initialized;
@@ -73,8 +72,8 @@ public:
     }
   }
 
-  // Read a single sample (blocking)
-  // Returns 16-bit signed value
+  // Read a single sample (non-blocking with timeout)
+  // Returns 16-bit signed value, 0 if timeout
   int16_t readSample() {
     if (!initialized)
       return 0;
@@ -82,10 +81,14 @@ public:
     int32_t sample = 0;
     size_t bytesRead = 0;
 
-    i2s_read(I2S_PORT, &sample, sizeof(sample), &bytesRead, portMAX_DELAY);
+    // Use short timeout instead of blocking forever
+    esp_err_t err = i2s_read(I2S_PORT, &sample, sizeof(sample), &bytesRead,
+                             pdMS_TO_TICKS(10));
+
+    if (err != ESP_OK || bytesRead == 0)
+      return 0;
 
     // INMP441 outputs 24-bit data in 32-bit frame, left-aligned
-    // Shift right by 14 to get 18-bit value, then by 2 more for 16-bit
     return (int16_t)(sample >> 16);
   }
 

@@ -20,12 +20,10 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-
 #include "config.h"
 #include "filters.h"
 #include "inmp441.h"
 #include "wavelet.h"
-
 
 // ============================================================================
 // GLOBAL OBJECTS
@@ -82,6 +80,9 @@ long rawPPG_IR = 0;
 float filteredPPG = 0;
 float waveletPPG = 0;
 
+// Sensor initialization flags
+bool max30102Initialized = false;
+
 // Audio
 int16_t rawAudio = 0;
 float filteredAudio = 0;
@@ -131,12 +132,14 @@ void setup() {
   // Initialize MAX30102
   if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
     Serial.println("[ERROR] MAX30102 not found!");
+    max30102Initialized = false;
   } else {
     particleSensor.setup(MAX30102_LED_BRIGHTNESS, MAX30102_SAMPLE_AVERAGE,
                          MAX30102_LED_MODE, MAX30102_SAMPLE_RATE,
                          MAX30102_PULSE_WIDTH, MAX30102_ADC_RANGE);
     particleSensor.setPulseAmplitudeRed(0x0A);
     particleSensor.setPulseAmplitudeGreen(0);
+    max30102Initialized = true;
     Serial.println("[OK] MAX30102 initialized");
   }
 
@@ -203,6 +206,10 @@ void processECG() {
 // PPG PROCESSING (SpO2 and Heart Rate)
 // ============================================================================
 void processPPG() {
+  // Skip if MAX30102 not initialized
+  if (!max30102Initialized)
+    return;
+
   static int sampleCount = 0;
   static bool isCollecting = false;
   static unsigned long lastPPGSample = 0;
