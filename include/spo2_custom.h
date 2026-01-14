@@ -11,11 +11,16 @@
 
 // Cấu hình
 #define SPO2_BUFFER_SIZE 200
-#define SPO2_MIN_SAMPLES 100
-#define SPO2_UPDATE_INTERVAL 500
-#define HR_SMOOTHING_FACTOR 0.05f
-#define SPO2_SMOOTHING_FACTOR 0.05f
-#define HR_MAX_CHANGE 15.0f
+#define SPO2_MIN_SAMPLES 50         // Giảm để phản hồi nhanh hơn
+#define SPO2_UPDATE_INTERVAL 300    // Cập nhật thường xuyên hơn
+#define HR_SMOOTHING_FACTOR 0.15f   // Tăng để hội tụ nhanh hơn
+#define SPO2_SMOOTHING_FACTOR 0.15f // Tăng để hội tụ nhanh hơn
+#define HR_MAX_CHANGE 25.0f         // Cho phép biến đổi lớn hơn
+
+// Ngưỡng phát hiện ngón tay - QUAN TRỌNG
+#define FINGER_THRESHOLD_LOW 1500    // Ngưỡng thấp (có thể điều chỉnh)
+#define FINGER_THRESHOLD_HIGH 100000 // Ngưỡng cao
+#define FINGER_STABLE_COUNT 30       // Số mẫu ổn định cần thiết
 
 class SpO2Calculator {
 private:
@@ -64,15 +69,21 @@ public:
       sampleCount++;
     }
 
-    // Phát hiện ngón tay
-    if (irValue > 50000) {
+    // Phát hiện ngón tay - sử dụng ngưỡng thích ứng
+    // Giá trị IR thường dao động từ 1000-3000 khi không có ngón tay
+    // và tăng lên 5000+ khi có ngón tay
+    if (irValue > FINGER_THRESHOLD_LOW && irValue < FINGER_THRESHOLD_HIGH) {
       stableFingerCount++;
-      if (stableFingerCount > 50) {
+      if (stableFingerCount > FINGER_STABLE_COUNT) {
         fingerPresent = true;
       }
     } else {
-      stableFingerCount = 0;
-      fingerPresent = false;
+      if (stableFingerCount > 0) {
+        stableFingerCount--; // Giảm từ từ thay vì reset ngay
+      }
+      if (stableFingerCount == 0) {
+        fingerPresent = false;
+      }
     }
 
     detectPeak(irValue);
@@ -142,18 +153,19 @@ public:
       return;
     }
 
-    // Cập nhật ngưỡng thích ứng
+    // Cập nhật ngưỡng thích ứng - phản hồi nhanh hơn
     if (peakThreshold == 0) {
       peakThreshold = irValue;
     } else {
-      peakThreshold = peakThreshold * 0.99f + irValue * 0.01f;
+      peakThreshold = peakThreshold * 0.95f + irValue * 0.05f;
     }
 
     float currentIR = (float)irValue;
 
-    // Phát hiện đỉnh
+    // Phát hiện đỉnh với ngưỡng thích ứng tốt hơn
+    // Đỉnh phải cao hơn ngưỡng trung bình ít nhất 0.5%
     if (lastIR > lastLastIR && lastIR > currentIR &&
-        lastIR > peakThreshold * 1.001f) {
+        lastIR > peakThreshold * 1.005f) {
       unsigned long now = millis();
       unsigned long interval = now - lastPeakTime;
 

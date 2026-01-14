@@ -54,6 +54,9 @@ float filteredAudio = 0;
 // Bộ đếm output
 int outputCounter = 0;
 
+// Debug variables
+unsigned long startTime = 0;
+
 // Biến xử lý ECG
 static int lastValidECG = 2048;
 static float lastValidFiltered = 0;
@@ -122,7 +125,13 @@ void setup() {
   timerAlarmEnable(ecgTimer);
 
   Serial.println("[OK] Timer 1000Hz da bat dau");
+  Serial.println("-----------------------------------");
+  Serial.println("# FINGER_THRESHOLD_LOW: 1500");
+  Serial.println("# FINGER_THRESHOLD_HIGH: 100000");
+  Serial.println("# Put finger on MAX30102 sensor");
   Serial.println("-----------------------------------\n");
+
+  startTime = millis();
   delay(500);
 }
 
@@ -216,6 +225,11 @@ void processPPG() {
   filteredPPG = ppgFilter.process(irFloat);
   waveletPPG = ppgWavelet.process(filteredPPG);
 
+  // Tính SpO2 và nhịp tim
+  spo2Calc.addSample(redValue, irValue);
+  fingerDetected = spo2Calc.isFingerDetected();
+  spo2Calc.calculate();
+
   // Xuất waveform PPG
   if (outputCounter % SERIAL_OUTPUT_DECIMATION == 0) {
     Serial.print(">ppg_ir_raw:");
@@ -224,12 +238,11 @@ void processPPG() {
     Serial.println(filteredPPG, 2);
     Serial.print(">ppg_ir_wavelet:");
     Serial.println(waveletPPG, 2);
-  }
 
-  // Tính SpO2 và nhịp tim
-  spo2Calc.addSample(redValue, irValue);
-  fingerDetected = spo2Calc.isFingerDetected();
-  spo2Calc.calculate();
+    // Debug output - giúp xác định ngưỡng phù hợp
+    Serial.print(">ppg_red_raw:");
+    Serial.println(redValue);
+  }
 }
 
 // Xử lý tín hiệu Audio
@@ -260,22 +273,44 @@ void displayValues() {
   if (currentTime - lastDisplayTime >= DISPLAY_INTERVAL_MS) {
     lastDisplayTime = currentTime;
 
+    // Luôn hiển thị finger status trước
+    Serial.print(">finger_detected:");
+    Serial.println(fingerDetected ? 1 : 0);
+
     if (fingerDetected) {
+      // Hiển thị HR và SpO2 khi có ngón tay
+      float hr = spo2Calc.getHeartRate();
+      float sp = spo2Calc.getSpO2();
+
       Serial.print(">heartrate:");
-      Serial.println(spo2Calc.getHeartRate(), 1);
+      Serial.println(hr, 1);
       Serial.print(">spo2:");
-      Serial.println(spo2Calc.getSpO2(), 1);
+      Serial.println(sp, 1);
+
+      // Debug: hiển thị các giá trị DC và AC
       Serial.print(">red_dc:");
       Serial.println(spo2Calc.getRedDC(), 0);
       Serial.print(">ir_dc:");
       Serial.println(spo2Calc.getIrDC(), 0);
+      Serial.print(">red_ac:");
+      Serial.println(spo2Calc.getRedAC(), 2);
+      Serial.print(">ir_ac:");
+      Serial.println(spo2Calc.getIrAC(), 2);
+      Serial.print(">sample_count:");
+      Serial.println(spo2Calc.getSampleCount());
     } else {
+      // Khi không có ngón tay, vẫn hiển thị 0
       Serial.println(">heartrate:0");
       Serial.println(">spo2:0");
+
+      // Hiển thị giá trị IR hiện tại để debug ngưỡng
+      Serial.print(">ir_current:");
+      Serial.println(rawPPG_IR);
     }
 
-    Serial.print(">finger_detected:");
-    Serial.println(fingerDetected ? 1 : 0);
+    // Hiển thị thời gian chạy (giây)
+    Serial.print(">runtime_sec:");
+    Serial.println((currentTime - startTime) / 1000);
   }
 }
 
