@@ -35,13 +35,15 @@
 #define INMP441_SD_PIN 35
 #define I2S_PORT I2S_NUM_0
 
-// Cấu hình bộ lọc
+// Cấu hình bộ lọc ECG
+// ECG bandwidth: 0.5-100Hz để giữ dạng sóng PQRST
+// R-peak cần tần số cao (lên đến 100Hz) để giữ độ sắc nét
 #define FILTER_SAMPLE_RATE 1000.0f
 #define NOTCH_50HZ_FREQ 50.0f
 #define NOTCH_100HZ_FREQ 100.0f
-#define NOTCH_Q_FACTOR 30.0f
-#define BANDPASS_LOW_FREQ 0.5f
-#define BANDPASS_HIGH_FREQ 40.0f
+#define NOTCH_Q_FACTOR 35.0f   // Q cao hơn = notch hẹp hơn, ít ảnh hưởng sóng
+#define BANDPASS_LOW_FREQ 0.5f // Loại bỏ baseline drift
+#define BANDPASS_HIGH_FREQ 100.0f // Tăng lên để giữ R-peak sắc nét (was 40Hz)
 #define DC_BLOCKER_ALPHA 0.995f
 
 // Cấu hình wavelet
