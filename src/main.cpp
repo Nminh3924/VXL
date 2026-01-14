@@ -47,6 +47,11 @@ float filteredPPG = 0;
 float waveletPPG = 0;
 bool max30102Initialized = false;
 
+// PPG warm-up variables (loại bỏ transient spike)
+static unsigned long ppgStartTime = 0;
+static bool ppgWarmupDone = false;
+const unsigned long PPG_WARMUP_MS = 3000; // 3 giây warm-up
+
 // Dữ liệu Audio
 int16_t rawAudio = 0;
 float filteredAudio = 0;
@@ -215,6 +220,18 @@ void processPPG() {
     return;
   lastPPGSample = micros();
 
+  // Khởi tạo thời gian warm-up
+  if (ppgStartTime == 0) {
+    ppgStartTime = millis();
+  }
+
+  // Kiểm tra warm-up xong chưa
+  if (!ppgWarmupDone && (millis() - ppgStartTime) >= PPG_WARMUP_MS) {
+    ppgWarmupDone = true;
+    ppgFilter.reset(); // Reset bộ lọc sau warm-up
+    ppgWavelet.reset();
+  }
+
   long irValue = particleSensor.getIR();
   long redValue = particleSensor.getRed();
 
@@ -230,16 +247,20 @@ void processPPG() {
   fingerDetected = spo2Calc.isFingerDetected();
   spo2Calc.calculate();
 
-  // Xuất waveform PPG
+  // Xuất waveform PPG (chỉ sau khi warm-up xong)
   if (outputCounter % SERIAL_OUTPUT_DECIMATION == 0) {
     Serial.print(">ppg_ir_raw:");
     Serial.println(irValue);
-    Serial.print(">ppg_ir_filtered:");
-    Serial.println(filteredPPG, 2);
-    Serial.print(">ppg_ir_wavelet:");
-    Serial.println(waveletPPG, 2);
 
-    // Debug output - giúp xác định ngưỡng phù hợp
+    // Chỉ xuất filtered/wavelet sau warm-up để tránh spike
+    if (ppgWarmupDone) {
+      Serial.print(">ppg_ir_filtered:");
+      Serial.println(filteredPPG, 2);
+      Serial.print(">ppg_ir_wavelet:");
+      Serial.println(waveletPPG, 2);
+    }
+
+    // Debug output
     Serial.print(">ppg_red_raw:");
     Serial.println(redValue);
   }
