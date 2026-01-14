@@ -47,10 +47,10 @@ float filteredPPG = 0;
 float waveletPPG = 0;
 bool max30102Initialized = false;
 
-// PPG warm-up variables (loại bỏ transient spike)
+// PPG warm-up variables (ĐÃ TẮT - đo ngay)
 static unsigned long ppgStartTime = 0;
-static bool ppgWarmupDone = false;
-const unsigned long PPG_WARMUP_MS = 3000; // 3 giây warm-up
+static bool ppgWarmupDone = true;      // Đặt true để bỏ qua warm-up
+const unsigned long PPG_WARMUP_MS = 0; // Không warm-up
 
 // Dữ liệu Audio
 int16_t rawAudio = 0;
@@ -67,7 +67,7 @@ static int lastValidECG = 2048;
 static float lastValidFiltered = 0;
 static unsigned long ecgStartTime = 0;
 static bool ecgWarmupDone = false;
-const unsigned long ECG_WARMUP_MS = 3000; // Tăng lên 3 giây để lắc ổn định
+const unsigned long ECG_WARMUP_MS = 0; // Không warm-up - đo ngay
 
 // Timer ISR - Lấy mẫu ECG 1000Hz
 void IRAM_ATTR onEcgTimer() {

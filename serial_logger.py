@@ -11,7 +11,7 @@ import os
 import glob
 
 BAUD_RATE = 115200
-DURATION_SECONDS = 300  # 5 phút
+DURATION_SECONDS = 180  # 3 phút
 OUTPUT_DIR = "data_logs"
 
 def list_ports():

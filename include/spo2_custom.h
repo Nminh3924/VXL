@@ -17,10 +17,12 @@
 #define SPO2_SMOOTHING_FACTOR 0.15f // Tăng để hội tụ nhanh hơn
 #define HR_MAX_CHANGE 25.0f         // Cho phép biến đổi lớn hơn
 
-// Ngưỡng phát hiện ngón tay - QUAN TRỌNG
-#define FINGER_THRESHOLD_LOW 1500    // Ngưỡng thấp (có thể điều chỉnh)
-#define FINGER_THRESHOLD_HIGH 100000 // Ngưỡng cao
-#define FINGER_STABLE_COUNT 30       // Số mẫu ổn định cần thiết
+// Ngưỡng phát hiện ngón tay - ĐIỀU CHỈNH THEO GIÁ TRỊ IR THỰC TẾ
+// Nếu ir_current ~ 230,000 khi có ngón tay, ngưỡng cần phù hợp
+#define FINGER_THRESHOLD_LOW                                                   \
+  100000 // Ngưỡng thấp (giá trị IR khi không có ngón tay thường < 50,000)
+#define FINGER_THRESHOLD_HIGH 500000 // Ngưỡng cao (tránh bão hòa)
+#define FINGER_STABLE_COUNT 20       // Giảm để phát hiện nhanh hơn
 
 class SpO2Calculator {
 private:
