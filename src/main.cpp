@@ -67,7 +67,7 @@ static int lastValidECG = 2048;
 static float lastValidFiltered = 0;
 static unsigned long ecgStartTime = 0;
 static bool ecgWarmupDone = false;
-const unsigned long ECG_WARMUP_MS = 2000;
+const unsigned long ECG_WARMUP_MS = 3000; // Tăng lên 3 giây để lắc ổn định
 
 // Timer ISR - Lấy mẫu ECG 1000Hz
 void IRAM_ATTR onEcgTimer() {
@@ -152,10 +152,10 @@ void processECG() {
   }
 
   // Kiểm tra warm-up xong chưa
+  // Bộ lọc cần thời gian để ổn định - không reset mà chờ cho transient qua
   if (!ecgWarmupDone && (millis() - ecgStartTime) >= ECG_WARMUP_MS) {
     ecgWarmupDone = true;
-    ecgFilter.reset();
-    ecgWavelet.reset();
+    // Không reset filter ở đây - để bộ lọc đã ổn định
   }
 
   // Kiểm tra lead-off
@@ -226,10 +226,10 @@ void processPPG() {
   }
 
   // Kiểm tra warm-up xong chưa
+  // Bộ lọc cần thời gian để ổn định - không reset mà chờ cho transient qua
   if (!ppgWarmupDone && (millis() - ppgStartTime) >= PPG_WARMUP_MS) {
     ppgWarmupDone = true;
-    ppgFilter.reset(); // Reset bộ lọc sau warm-up
-    ppgWavelet.reset();
+    // Không reset filter - để bộ lọc đã ổn định
   }
 
   long irValue = particleSensor.getIR();
