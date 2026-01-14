@@ -23,18 +23,24 @@ import matplotlib.pyplot as plt
 DATA_DIR = "data_logs"
 OUTPUT_DIR = "processed_data"
 
-# Sample rates
-ECG_SAMPLE_RATE = 100   # Hz (đã decimation từ 500Hz)
-PPG_SAMPLE_RATE = 100   # Hz
+# Sample rates (dựa trên code ESP32 v2.0)
+ECG_SAMPLE_RATE = 500   # Hz (1000Hz / 2 decimation = 500Hz output)
+PPG_SAMPLE_RATE = 500   # Hz (1000Hz / 2 decimation = 500Hz output)
 
-# ECG Filter parameters
-ECG_LOWCUT = 0.5        # Hz - loại bỏ baseline drift
-ECG_HIGHCUT = 40.0      # Hz - loại bỏ noise cao tần
+# ECG Filter parameters - ĐÃ TỐI ƯU
+ECG_LOWCUT = 0.5        # Hz - loại bỏ baseline drift  
+ECG_HIGHCUT = 45.0      # Hz - tăng để giữ R-peak sắc nét (was 40)
 ECG_NOTCH_FREQ = 50.0   # Hz - loại bỏ nhiễu điện lưới
 
-# PPG Filter parameters  
-PPG_LOWCUT = 0.5        # Hz
-PPG_HIGHCUT = 5.0       # Hz - PPG chậm hơn ECG
+# PPG Filter parameters - ĐÃ TỐI ƯU
+PPG_LOWCUT = 0.4        # Hz - giảm để bắt baseline tốt hơn (was 0.5)
+PPG_HIGHCUT = 8.0       # Hz - tăng để giữ chi tiết sóng (was 5.0)
+
+# Wavelet parameters - ĐÃ TỐI ƯU
+ECG_WAVELET = 'db6'     # Daubechies 6 - tốt hơn db4 cho ECG với R-peak
+PPG_WAVELET = 'sym5'    # Symlet 5 - phù hợp cho PPG
+WAVELET_LEVEL = 5       # Mức decomposition (tăng để khử nhiễu tốt hơn)
+THRESHOLD_MULTIPLIER = 0.8  # Hệ số threshold (giảm để giữ nhiều chi tiết hơn)
 
 
 # ============================================
@@ -74,55 +80,114 @@ def remove_baseline_wander(data, fs, cutoff=0.5):
     return signal.filtfilt(b, a, data)
 
 
-def process_ecg(raw_ecg, fs=ECG_SAMPLE_RATE):
+def wavelet_denoise(data, wavelet='db4', level=4, threshold_mode='soft', threshold_mult=1.0):
     """
-    Xử lý tín hiệu ECG raw
-    1. Loại bỏ baseline wander
-    2. Notch filter 50Hz
-    3. Bandpass filter 0.5-40Hz
-    4. Làm mượt nhẹ
+    Khử nhiễu bằng Wavelet Transform
+    
+    Args:
+        data: Tín hiệu đầu vào
+        wavelet: Loại wavelet ('db4', 'db6' cho ECG, 'sym5' cho PPG)
+        level: Số mức decomposition
+        threshold_mode: 'soft' hoặc 'hard'
+        threshold_mult: Hệ số nhân threshold (nhỏ hơn = giữ nhiều chi tiết hơn)
+    
+    Returns:
+        Tín hiệu đã khử nhiễu
+    """
+    try:
+        import pywt
+    except ImportError:
+        print("⚠ pywt chưa cài đặt. Chạy: pip install PyWavelets")
+        return data
+    
+    # Decompose
+    coeffs = pywt.wavedec(data, wavelet, level=level)
+    
+    # Tính ngưỡng sử dụng MAD (Median Absolute Deviation)
+    # Công thức: threshold = sigma * sqrt(2 * log(n)) * threshold_mult
+    sigma = np.median(np.abs(coeffs[-1])) / 0.6745
+    threshold = sigma * np.sqrt(2 * np.log(len(data))) * threshold_mult
+    
+    # Áp dụng threshold cho các detail coefficients (giữ nguyên approximation)
+    denoised_coeffs = [coeffs[0]]  # Giữ nguyên approximation
+    for i in range(1, len(coeffs)):
+        if threshold_mode == 'soft':
+            denoised = pywt.threshold(coeffs[i], threshold, mode='soft')
+        else:
+            denoised = pywt.threshold(coeffs[i], threshold, mode='hard')
+        denoised_coeffs.append(denoised)
+    
+    # Reconstruct
+    denoised_signal = pywt.waverec(denoised_coeffs, wavelet)
+    
+    return denoised_signal[:len(data)]
+    
+    # Reconstruct
+    denoised_signal = pywt.waverec(denoised_coeffs, wavelet)
+    
+    # Đảm bảo độ dài khớp
+    return denoised_signal[:len(data)]
+
+
+def process_ecg(raw_ecg, fs=ECG_SAMPLE_RATE, use_wavelet=True):
+    """
+    Xử lý tín hiệu ECG raw - PHƯƠNG PHÁP TỐI ƯU
+    Pipeline: Baseline removal → Wavelet denoise → Notch filter → Lowpass filter
     """
     if len(raw_ecg) < 10:
         return raw_ecg
     
-    # 1. Loại bỏ baseline wander
+    # 1. Loại bỏ baseline wander (high-pass 0.5Hz)
     ecg_no_baseline = remove_baseline_wander(raw_ecg, fs, ECG_LOWCUT)
     
-    # 2. Notch filter 50Hz (nếu sample rate đủ cao)
+    # 2. Wavelet denoising (db6 tốt hơn với R-peak)
+    if use_wavelet:
+        level = min(WAVELET_LEVEL, int(np.log2(len(ecg_no_baseline))) - 1)
+        ecg_denoised = wavelet_denoise(ecg_no_baseline, wavelet=ECG_WAVELET, 
+                                        level=level, threshold_mode='soft',
+                                        threshold_mult=THRESHOLD_MULTIPLIER)
+    else:
+        ecg_denoised = ecg_no_baseline
+    
+    # 3. Notch filter 50Hz (loại bỏ nhiễu điện lưới)
     if fs > 2 * ECG_NOTCH_FREQ:
         b, a = notch_filter(ECG_NOTCH_FREQ, fs)
-        ecg_notched = signal.filtfilt(b, a, ecg_no_baseline)
+        ecg_notched = signal.filtfilt(b, a, ecg_denoised)
     else:
-        ecg_notched = ecg_no_baseline
+        ecg_notched = ecg_denoised
     
-    # 3. Lowpass filter
+    # 4. Lowpass filter (loại bỏ noise còn lại)
     b, a = butter_lowpass(ECG_HIGHCUT, fs, order=4)
     ecg_filtered = signal.filtfilt(b, a, ecg_notched)
     
     return ecg_filtered
 
 
-def process_ppg(raw_ppg, fs=PPG_SAMPLE_RATE):
+def process_ppg(raw_ppg, fs=PPG_SAMPLE_RATE, use_wavelet=True):
     """
-    Xử lý tín hiệu PPG raw
-    1. Loại bỏ baseline
-    2. Bandpass filter 0.5-5Hz
-    3. Làm mượt
+    Xử lý tín hiệu PPG raw - PHƯƠNG PHÁP TỐI ƯU
+    Pipeline: Baseline removal → Wavelet denoise → Lowpass filter
     """
     if len(raw_ppg) < 10:
         return raw_ppg
     
-    # 1. Loại bỏ baseline
+    # 1. Loại bỏ baseline (high-pass 0.4Hz)
     ppg_no_baseline = remove_baseline_wander(raw_ppg, fs, PPG_LOWCUT)
     
-    # 2. Lowpass filter
+    # 2. Wavelet denoising (sym5 phù hợp với PPG)
+    if use_wavelet:
+        level = min(WAVELET_LEVEL, int(np.log2(len(ppg_no_baseline))) - 1)
+        ppg_denoised = wavelet_denoise(ppg_no_baseline, wavelet=PPG_WAVELET, 
+                                        level=level, threshold_mode='soft',
+                                        threshold_mult=THRESHOLD_MULTIPLIER)
+    else:
+        ppg_denoised = ppg_no_baseline
+    
+    # 3. Lowpass filter (PPG chậm, 8Hz giữ chi tiết tốt hơn)
     b, a = butter_lowpass(PPG_HIGHCUT, fs, order=3)
-    ppg_filtered = signal.filtfilt(b, a, ppg_no_baseline)
+    ppg_filtered = signal.filtfilt(b, a, ppg_denoised)
     
-    # 3. Làm mượt nhẹ
-    ppg_smooth = uniform_filter1d(ppg_filtered, size=3)
-    
-    return ppg_smooth
+    return ppg_filtered
 
 
 def calculate_heart_rate(ppg_signal, fs=PPG_SAMPLE_RATE):
