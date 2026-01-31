@@ -35,18 +35,14 @@ except ImportError:
     HAS_PYWT = False
     print("[WARN] PyWavelets not installed. Wavelet denoising disabled.")
 
-# ============================================================
 # CẤU HÌNH
-# ============================================================
 DEFAULT_FS_ECG = 500      # Tần số lấy mẫu ECG (Hz)
-DEFAULT_FS_PPG = 100      # Tần số lấy mẫu PPG (Hz)
+DEFAULT_FS_PPG = 100      # Tần số lấy mẫu PPG (Hz) - 400Hz internal / 4 avg
 DEFAULT_FS_AUDIO = 16000  # Tần số lấy mẫu Audio (Hz)
 OUTPUT_DIR = "processed_data"
-WINDOW_SEC = 10.0         # Cửa sổ hiển thị (giây)
+WINDOW_SEC = 30.0         # Cửa sổ hiển thị (giây)
 
-# ============================================================
 # ĐỌC FILE LOG
-# ============================================================
 def parse_log_file(filepath):
     """Đọc file log và trích xuất dữ liệu ECG, PPG, Audio"""
     data = {
@@ -90,20 +86,29 @@ def parse_log_file(filepath):
     for key in data:
         data[key] = np.array(data[key])
     
-    # Ước tính sample rate thực tế
+    # Ước tính sample rate thực tế dựa trên runtime cuối cùng
     estimated_fs = {}
-    if len(data['ecg_raw']) > 0 and max_runtime['ecg'] > 0:
-        estimated_fs['ecg'] = len(data['ecg_raw']) / max_runtime['ecg']
-    if len(data['ppg_ir_raw']) > 0 and max_runtime['ppg'] > 0:
-        estimated_fs['ppg'] = len(data['ppg_ir_raw']) / max_runtime['ppg']
-    if len(data['audio_raw']) > 0 and max_runtime['audio'] > 0:
-        estimated_fs['audio'] = len(data['audio_raw']) / max_runtime['audio']
+    
+    # Lấy runtime lớn nhất (thường là runtime cuối cùng ghi được)
+    max_runtime_val = 0
+    if max_runtime:
+        max_runtime_val = max(max_runtime.values())
+    
+    if max_runtime_val > 0:
+        if len(data['ecg_raw']) > 0:
+            estimated_fs['ecg'] = len(data['ecg_raw']) / max_runtime_val
+        if len(data['ppg_ir_raw']) > 0:
+            estimated_fs['ppg'] = len(data['ppg_ir_raw']) / max_runtime_val
+            
+    print(f"  [Auto-Detect FS] Runtime: {max_runtime_val}s")
+    if 'ecg' in estimated_fs:
+        print(f"  [Auto-Detect FS] ECG: {estimated_fs['ecg']:.2f} Hz (Samples: {len(data['ecg_raw'])})")
+    if 'ppg' in estimated_fs:
+        print(f"  [Auto-Detect FS] PPG: {estimated_fs['ppg']:.2f} Hz (Samples: {len(data['ppg_ir_raw'])})")
     
     return data, estimated_fs
 
-# ============================================================
 # XỬ LÝ ARTIFACT ECG
-# ============================================================
 def remove_ecg_artifacts(data, threshold=500):
     """
     Loại bỏ artifact (tín hiệu tụt về 0).
@@ -144,9 +149,7 @@ def remove_ecg_artifacts(data, threshold=500):
     
     return data
 
-# ============================================================
 # CÁC BỘ LỌC (FILTERS)
-# ============================================================
 def butter_bandpass(data, lowcut, highcut, fs, order=4):
     """Butterworth Bandpass Filter"""
     if len(data) == 0:
@@ -209,9 +212,7 @@ def wavelet_denoise(data, wavelet='db6', level=4):
     except:
         return data
 
-# ============================================================
 # PIPELINE XỬ LÝ ECG
-# ============================================================
 def process_ecg(raw_data, fs):
     """
     ECG Processing Pipeline:
@@ -232,21 +233,20 @@ def process_ecg(raw_data, fs):
     # Step 2: Light median filter
     cleaned = median_filter(cleaned, size=3)
     
-    # Step 3: Notch filter 50Hz
-    filtered = notch_filter(cleaned, 50.0, 30.0, fs)
+    # Step 3: Notch filter 50Hz - DISABLED to check signal distortion
+    # filtered = notch_filter(cleaned, 50.0, 30.0, fs)
+    filtered = cleaned
     
-    # Step 4: Bandpass 0.5-40Hz
-    filtered = butter_bandpass(filtered, 0.5, 40.0, fs)
+    # Step 4: Bandpass 0.5-40Hz (Reduced order to minimize ringing)
+    filtered = butter_bandpass(filtered, 0.5, 40.0, fs, order=2)
     
-    # Step 5: Wavelet denoise (optional)
-    if HAS_PYWT:
-        filtered = wavelet_denoise(filtered, 'db6', 4)
+    # Step 5: Wavelet denoise (optional) - DISABLED to preserve R-peak amplitude
+    # if HAS_PYWT:
+    #     filtered = wavelet_denoise(filtered, 'db6', 4)
     
     return filtered
 
-# ============================================================
 # PIPELINE XỬ LÝ PPG
-# ============================================================
 def remove_ppg_artifacts(data):
     """
     Loại bỏ artifact trong PPG (giá trị bất thường).
@@ -257,22 +257,30 @@ def remove_ppg_artifacts(data):
     
     data = np.array(data, dtype=float)
     
-    # Tính ngưỡng dựa trên IQR
-    q1 = np.percentile(data, 5)
-    q3 = np.percentile(data, 95)
+    # Bỏ 15% đầu (thường có transient lớn khi bắt đầu đo)
+    skip_samples = int(len(data) * 0.15)
+    stable_region = data[skip_samples:]
+    
+    if len(stable_region) < 10:
+        stable_region = data
+    
+    # Tính ngưỡng dựa trên phần ổn định
+    q1 = np.percentile(stable_region, 10)
+    q3 = np.percentile(stable_region, 90)
     iqr = q3 - q1
     
-    low_thresh = q1 - 2.0 * iqr
-    high_thresh = q3 + 2.0 * iqr
+    # Ngưỡng chặt hơn
+    low_thresh = q1 - 1.5 * iqr
+    high_thresh = q3 + 1.5 * iqr
     
-    # Tìm artifact
+    # Tìm artifact trên toàn bộ dữ liệu
     artifact_mask = (data < low_thresh) | (data > high_thresh)
     
-    # Mở rộng vùng artifact
+    # Mở rộng vùng artifact (trước 5, sau 10)
     indices = np.where(artifact_mask)[0]
     for idx in indices:
-        start = max(0, idx - 3)
-        end = min(len(data), idx + 5)
+        start = max(0, idx - 5)
+        end = min(len(data), idx + 10)
         artifact_mask[start:end] = True
     
     artifact_count = np.sum(artifact_mask)
@@ -320,13 +328,13 @@ def process_ppg(raw_data, fs):
     
     # Step 5: Moving average smoothing
     from scipy.ndimage import uniform_filter1d
-    smoothed = uniform_filter1d(filtered, size=5)
+    smoothed = uniform_filter1d(filtered, size=2)
     
-    return smoothed
+    # Step 6: Invert signal (Because Absorption increases -> Reflection decreases)
+    # We want peaks to represent pulsation (high blood volume)
+    return -smoothed
 
-# ============================================================
 # TÌM ĐỈNH R VÀ TÍNH NHỊP TIM
-# ============================================================
 def detect_r_peaks(ecg, fs):
     """Tìm đỉnh R trong ECG và tính heart rate"""
     if len(ecg) < 100:
@@ -348,9 +356,7 @@ def detect_r_peaks(ecg, fs):
     
     return peaks, hr
 
-# ============================================================
 # TÌM ĐOẠN ỔN ĐỊNH NHẤT
-# ============================================================
 def find_stable_segment(data, fs, window_sec):
     """Tìm đoạn tín hiệu ổn định nhất trong data"""
     N = len(data)
@@ -359,8 +365,8 @@ def find_stable_segment(data, fs, window_sec):
     if N <= win_len:
         return 0, N
     
-    # Skip 10% đầu và cuối
-    start_range = int(N * 0.1)
+    # Skip 30% đầu (transient khi cảm biến ổn định) và 10% cuối
+    start_range = int(N * 0.3)
     end_range = int(N * 0.9)
     
     if end_range - start_range < win_len:
@@ -380,11 +386,9 @@ def find_stable_segment(data, fs, window_sec):
     
     return best_start, best_start + win_len
 
-# ============================================================
-# VẼ BIỂU ĐỒ
-# ============================================================
-def create_plot(data, fs_config, output_file):
-    """Tạo biểu đồ 3 hàng: ECG, PPG Red, PPG IR - ĐỒNG BỘ CÙNG THỜI GIAN"""
+
+def create_plot(data, fs_config, output_file, window_sec=30.0):
+    """Tạo biểu đồ 3 hàng x 1 cột: Raw (Trái Axis) & Filtered (Phải Axis) chồng lên nhau"""
     
     ecg = data['ecg_raw']
     ppg_ir = data['ppg_ir_raw']
@@ -398,81 +402,115 @@ def create_plot(data, fs_config, output_file):
     ppg_ir_clean = process_ppg(ppg_ir, fs_ppg) if len(ppg_ir) > 0 else np.array([])
     ppg_red_clean = process_ppg(ppg_red, fs_ppg) if len(ppg_red) > 0 else np.array([])
     
-    # Tính thời lượng của mỗi tín hiệu (giây)
-    dur_ecg = len(ecg_clean) / fs_ecg if len(ecg_clean) > 0 else 0
-    dur_ppg = len(ppg_red_clean) / fs_ppg if len(ppg_red_clean) > 0 else 0
-    
-    # Tìm thời lượng ngắn nhất
-    min_duration = min(dur_ecg, dur_ppg) if dur_ecg > 0 and dur_ppg > 0 else max(dur_ecg, dur_ppg)
-    
-    # Lấy 10 giây Ở GIỮA
-    window_sec = 10.0
-    if min_duration > window_sec:
-        # Tính điểm giữa
-        mid_time = min_duration / 2
-        t_start = mid_time - window_sec / 2
-        t_end = mid_time + window_sec / 2
+    # Tìm đoạn ổn định nhất cho ECG
+    if len(ecg_clean) > 0:
+        s_ecg, e_ecg = find_stable_segment(ecg_clean, fs_ecg, window_sec)
+        t_start = s_ecg / fs_ecg
+        t_end = e_ecg / fs_ecg
     else:
-        # Nếu ngắn hơn 10s, lấy hết
-        t_start = 0
-        t_end = min_duration
+        t_start, t_end = 0, window_sec
+        s_ecg, e_ecg = 0, 0
     
-    print(f"  [Sync] Using time window: {t_start:.1f}s - {t_end:.1f}s (middle 10s)")
+    print(f"  [Best Window] ECG: {t_start:.1f}s - {t_end:.1f}s (best {window_sec}s)")
     
-    # Cắt từng tín hiệu theo cùng khoảng thời gian
-    s_ecg = int(t_start * fs_ecg)
-    e_ecg = int(t_end * fs_ecg)
+    # Cắt ECG (Raw & Clean)
+    if len(ecg_clean) > 0:
+        ecg_view = ecg_clean[s_ecg:e_ecg]
+        ecg_raw_view = ecg[s_ecg:e_ecg]
+    else:
+        ecg_view = np.zeros(100)
+        ecg_raw_view = np.zeros(100)
+    
+    # Cắt PPG (Raw & Clean)
     s_ppg = int(t_start * fs_ppg)
     e_ppg = int(t_end * fs_ppg)
     
-    ecg_view = ecg_clean[s_ecg:e_ecg] if len(ecg_clean) > e_ecg else ecg_clean[s_ecg:]
-    ppg_red_view = ppg_red_clean[s_ppg:e_ppg] if len(ppg_red_clean) > e_ppg else ppg_red_clean[s_ppg:]
-    ppg_ir_view = ppg_ir_clean[s_ppg:e_ppg] if len(ppg_ir_clean) > e_ppg else ppg_ir_clean[s_ppg:]
+    def safe_slice(arr, start, end):
+        if len(arr) == 0: return np.zeros(100)
+        start = max(0, min(start, len(arr)-1))
+        end = max(start, min(end, len(arr)))
+        return arr[start:end]
+
+    ppg_red_view = safe_slice(ppg_red_clean, s_ppg, e_ppg)
+    ppg_ir_view = safe_slice(ppg_ir_clean, s_ppg, e_ppg)
+    
+    ppg_red_raw_view = safe_slice(ppg_red, s_ppg, e_ppg)
+    ppg_ir_raw_view = safe_slice(ppg_ir, s_ppg, e_ppg)
     
     # Tính HR
     peaks, hr = detect_r_peaks(ecg_view, fs_ecg)
     
-    # Tạo trục thời gian ĐỒNG BỘ
+    # Tạo trục thời gian
     t_ecg = np.linspace(t_start, t_end, len(ecg_view))
     t_ppg = np.linspace(t_start, t_end, len(ppg_red_view))
     
-    # Vẽ biểu đồ
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10))
+    # === PLOT 1: FILTERED ===
+    fig_filt, ax_filt = plt.subplots(3, 1, figsize=(14, 10))
     
-    # ECG
-    ax1 = axes[0]
-    ax1.plot(t_ecg, ecg_view, 'orange', linewidth=1, label='ECG Filtered')
+    # ECG Filtered
+    ax_filt[0].plot(t_ecg, ecg_view, 'orange', linewidth=1, label='ECG Filtered')
     if len(peaks) > 0:
-        ax1.plot(t_ecg[peaks], ecg_view[peaks], 'r+', markersize=10, label='R-peaks')
-    ax1.set_title(f"ECG ({t_start:.0f}s - {t_end:.0f}s) | Heart Rate: {hr:.0f} BPM", fontweight='bold')
-    ax1.set_ylabel("Amplitude")
-    ax1.legend(loc='upper right')
-    ax1.grid(True, alpha=0.4)
+        ax_filt[0].plot(t_ecg[peaks], ecg_view[peaks], 'r+', markersize=10, label='R-peaks')
+    ax_filt[0].set_title(f"ECG Filtered | Heart Rate: {hr:.0f} BPM", fontweight='bold')
+    ax_filt[0].set_ylabel("Amplitude")
+    ax_filt[0].legend(loc='upper right')
+    ax_filt[0].grid(True, alpha=0.4)
     
-    # PPG Red
-    ax2 = axes[1]
-    ax2.plot(t_ppg, ppg_red_view, 'red', linewidth=1)
-    ax2.set_title(f"PPG Red ({t_start:.0f}s - {t_end:.0f}s)", fontweight='bold')
-    ax2.set_ylabel("Amplitude")
-    ax2.grid(True, alpha=0.4)
+    # PPG Red Filtered
+    ax_filt[1].plot(t_ppg, ppg_red_view, 'red', linewidth=1)
+    ax_filt[1].set_title(f"PPG Red Filtered (660nm)", fontweight='bold')
+    ax_filt[1].set_ylabel("Amplitude")
+    ax_filt[1].grid(True, alpha=0.4)
     
-    # PPG IR
-    ax3 = axes[2]
-    t_ir = np.linspace(t_start, t_end, len(ppg_ir_view))
-    ax3.plot(t_ir, ppg_ir_view, 'green', linewidth=1)
-    ax3.set_title(f"PPG IR ({t_start:.0f}s - {t_end:.0f}s)", fontweight='bold')
-    ax3.set_xlabel("Time (seconds)")
-    ax3.set_ylabel("Amplitude")
-    ax3.grid(True, alpha=0.4)
+    # PPG IR Filtered
+    ax_filt[2].plot(t_ppg, ppg_ir_view, 'green', linewidth=1)
+    ax_filt[2].set_title(f"PPG IR Filtered (880nm)", fontweight='bold')
+    ax_filt[2].set_xlabel("Time (seconds)")
+    ax_filt[2].set_ylabel("Amplitude")
+    ax_filt[2].grid(True, alpha=0.4)
+    
+    # Filtered Plots: Invert X-axis ONLY for PPG (Index 1, 2) per user request
+    ax_filt[1].invert_xaxis()
+    ax_filt[2].invert_xaxis()
+
+    plt.tight_layout()
+    file_filt = output_file.replace(".png", "_filtered.png")
+    fig_filt.savefig(file_filt, dpi=150)
+    print(f"\n[OK] Saved Filtered Plot: {file_filt}")
+    plt.close(fig_filt)
+
+    # === PLOT 2: RAW ===
+    fig_raw, ax_raw = plt.subplots(3, 1, figsize=(14, 10))
+    
+    # ECG Raw
+    ax_raw[0].plot(t_ecg, ecg_raw_view, 'gray', linewidth=1)
+    ax_raw[0].set_title(f"ECG Raw (ADC Value)", fontweight='bold')
+    ax_raw[0].set_ylabel("ADC Value")
+    ax_raw[0].grid(True, alpha=0.4)
+    
+    # PPG Red Raw (Inverted)
+    ax_raw[1].plot(t_ppg, -ppg_red_raw_view, 'gray', linewidth=1)
+    ax_raw[1].set_title(f"PPG Red Raw (Inverted ADC)", fontweight='bold')
+    ax_raw[1].set_ylabel("Inverted ADC")
+    ax_raw[1].grid(True, alpha=0.4)
+    
+    # PPG IR Raw (Inverted)
+    ax_raw[2].plot(t_ppg, -ppg_ir_raw_view, 'gray', linewidth=1)
+    ax_raw[2].set_title(f"PPG IR Raw (Inverted ADC)", fontweight='bold')
+    ax_raw[2].set_xlabel("Time (seconds)")
+    ax_raw[2].set_ylabel("Inverted ADC")
+    ax_raw[2].grid(True, alpha=0.4)
+    
+    # Raw Plots: Invert X-axis ONLY for PPG (Index 1, 2)
+    ax_raw[1].invert_xaxis()
+    ax_raw[2].invert_xaxis()
     
     plt.tight_layout()
-    plt.savefig(output_file, dpi=150)
-    print(f"\n[OK] Saved: {output_file}")
-    plt.close()
+    file_raw = output_file.replace(".png", "_raw.png")
+    fig_raw.savefig(file_raw, dpi=150)
+    print(f"[OK] Saved Raw Plot:      {file_raw}")
+    plt.close(fig_raw)
 
-# ============================================================
-# MAIN
-# ============================================================
 def find_latest_log(data_dir):
     """Tìm file log mới nhất"""
     files = glob.glob(os.path.join(data_dir, "serial_log_*.txt"))
@@ -513,7 +551,7 @@ def main():
     output_file = os.path.join(OUTPUT_DIR, f"result_{timestamp}.png")
     
     # Process and plot
-    create_plot(data, fs_config, output_file)
+    create_plot(data, fs_config, output_file, window_sec)
     print("[DONE]")
 
 if __name__ == "__main__":

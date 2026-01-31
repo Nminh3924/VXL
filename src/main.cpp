@@ -1,147 +1,197 @@
 #include "MAX30105.h"
 #include "config.h"
 #include <Arduino.h>
-#include <driver/i2s.h>
+#include <Wire.h>
 
 // --- OBJECTS ---
 MAX30105 ppg;
+hw_timer_t *timer = NULL;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 
 // --- CONFIGURATION ---
-// Total measurement time: 30 seconds (adjustable)
-#define SAMPLE_DURATION_MS 30000
+#define SERIAL_BAUD 460800
+#define SAMPLE_DURATION_MS 180000
+#define ECG_BUFFER_SIZE 512
+#define PPG_QUEUE_SIZE 512
 
-// --- STATES ---
-enum State {
-  STATE_IDLE,
-  STATE_MEASURING, // Đo tất cả cùng lúc!
-  STATE_DONE
+// --- FreeRTOS ---
+TaskHandle_t ppgTaskHandle = NULL;
+QueueHandle_t ppgQueue = NULL;
+
+// PPG Data Structure
+struct PPGSample {
+  uint32_t ir;
+  uint32_t red;
 };
 
-State currentState = STATE_IDLE;
-unsigned long phaseStartTime = 0;
+// --- SHARED DATA ---
+volatile int ecgBuffer[ECG_BUFFER_SIZE];
+volatile int ecgHead = 0;
+volatile int ecgTail = 0;
+volatile bool measurementActive = false;
 
-// --- I2S CONFIG (INMP441) ---
-void initI2S() {
-  i2s_config_t i2s_config = {.mode =
-                                 (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-                             .sample_rate = 16000,
-                             .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-                             .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-                             .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-                             .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-                             .dma_buf_count = 8,
-                             .dma_buf_len = 64,
-                             .use_apll = false,
-                             .tx_desc_auto_clear = false,
-                             .fixed_mclk = 0};
+// PPG debug counter
+volatile uint32_t ppgSampleCount = 0;
 
-  i2s_pin_config_t pin_config = {.bck_io_num = INMP441_SCK_PIN,
-                                 .ws_io_num = INMP441_WS_PIN,
-                                 .data_out_num = I2S_PIN_NO_CHANGE,
-                                 .data_in_num = INMP441_SD_PIN};
+// --- ISR: TIMER INTERRUPT (500Hz) for ECG ---
+void IRAM_ATTR onTimer() {
+  if (measurementActive) {
+    int val = analogRead(AD8232_OUTPUT_PIN);
 
-  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-  i2s_set_pin(I2S_NUM_0, &pin_config);
-  i2s_zero_dma_buffer(I2S_NUM_0);
+    portENTER_CRITICAL_ISR(&timerMux);
+    int nextHead = (ecgHead + 1) % ECG_BUFFER_SIZE;
+    if (nextHead != ecgTail) {
+      ecgBuffer[ecgHead] = val;
+      ecgHead = nextHead;
+    }
+    portEXIT_CRITICAL_ISR(&timerMux);
+  }
 }
 
-// --- PPG INIT ---
-bool initPPG() {
-  if (!ppg.begin(Wire, I2C_SPEED_FAST)) {
-    return false;
+// --- PPG TASK (runs on Core 0) - AGGRESSIVE VERSION ---
+void ppgTask(void *pvParameters) {
+  Serial.println("# PPG Task started on Core 0");
+
+  TickType_t lastWakeTime = xTaskGetTickCount();
+
+  while (true) {
+    if (measurementActive) {
+      // Poll MAX30102 FIFO as fast as possible
+      ppg.check();
+
+      // Read ALL available samples from FIFO
+      while (ppg.available()) {
+        PPGSample sample;
+        sample.ir = ppg.getIR();
+        sample.red = ppg.getRed();
+        ppg.nextSample();
+        ppgSampleCount++;
+
+        // Send to queue (non-blocking, drop if full)
+        xQueueSend(ppgQueue, &sample, 0);
+      }
+
+      // Yield to other tasks but don't waste time
+      taskYIELD();
+
+    } else {
+      // Idle mode - check less frequently
+      vTaskDelay(pdMS_TO_TICKS(50));
+    }
   }
-  // Setup: ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth,
-  // adcRange Mode 2: Red + IR, 100Hz sample rate
-  ppg.setup(0x1F, 4, 2, 100, 411, 4096);
-  return true;
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(SERIAL_BAUD);
 
-  // PIN CONFIG
   pinMode(AD8232_LO_PLUS_PIN, INPUT);
   pinMode(AD8232_LO_MINUS_PIN, INPUT);
 
-  // INIT SENSORS
-  if (!initPPG()) {
-    Serial.println("# Error: MAX30102 Init Failed!");
-  }
-  initI2S();
+  // Init MAX30102 with Fast I2C
+  Wire.begin();
+  Wire.setClock(400000);
 
-  Serial.println("# System Ready - SIMULTANEOUS MODE");
-  Serial.println(
-      "# Send 's' or ENTER to start measuring ECG + PPG + Audio together.");
+  if (!ppg.begin(Wire, I2C_SPEED_FAST)) {
+    Serial.println("# Error: MAX30102 Init Failed!");
+  } else {
+    // FINAL TEST: No averaging (sampleAvg=1), max internal rate
+    // 1600Hz internal / 1 avg = 1600Hz theoretical output
+    ppg.setup(0x1F, 1, 2, 1600, 411, 16384);
+    Serial.println("# MAX30102: 1600Hz/1avg = MAX SPEED TEST");
+  }
+
+  // Create PPG Queue (larger)
+  ppgQueue = xQueueCreate(PPG_QUEUE_SIZE, sizeof(PPGSample));
+
+  // Create PPG Task on Core 0 with HIGH priority
+  xTaskCreatePinnedToCore(ppgTask, "PPG_Task", 4096, NULL,
+                          configMAX_PRIORITIES - 1, // Highest priority
+                          &ppgTaskHandle,
+                          0 // Core 0
+  );
+
+  // Init Timer (500Hz) for ECG
+  timer = timerBegin(0, 80, true);
+  timerAttachInterrupt(timer, &onTimer, true);
+  timerAlarmWrite(timer, 2000, true);
+  timerAlarmEnable(timer);
+
+  Serial.println("# DUAL-CORE: PPG@Core0 (high prio), ECG@Core1");
+  Serial.println("# Press ENTER to start.");
 }
 
 void loop() {
-  unsigned long now = millis();
+  static unsigned long startTime = 0;
+  static unsigned long lastLog = 0;
+  static uint32_t lastPPGCount = 0;
 
-  switch (currentState) {
-  case STATE_IDLE:
-    if (Serial.available() > 0) {
-      while (Serial.available())
-        Serial.read();
-
-      Serial.println("# ========================================");
-      Serial.println("# STARTING: ECG + PPG + AUDIO (Simultaneous)");
-      Serial.print("# Duration: ");
-      Serial.print(SAMPLE_DURATION_MS / 1000);
-      Serial.println(" seconds");
-      Serial.println("# ========================================");
-
-      currentState = STATE_MEASURING;
-      phaseStartTime = now;
+  // CMD Handling
+  if (Serial.available()) {
+    while (Serial.available())
+      Serial.read();
+    if (!measurementActive) {
+      Serial.println("# STARTING...");
+      startTime = millis();
+      ecgHead = 0;
+      ecgTail = 0;
+      ppgSampleCount = 0;
+      xQueueReset(ppgQueue);
+      measurementActive = true;
     }
-    break;
-
-  case STATE_MEASURING: {
-    // ===== 1. ECG (Analog ~500Hz) =====
-    int ecgVal = analogRead(AD8232_OUTPUT_PIN);
-    Serial.print(">ecg_raw:");
-    Serial.println(ecgVal);
-
-    // ===== 2. PPG (I2C ~100Hz) =====
-    ppg.check();
-    if (ppg.available()) {
-      Serial.print(">ppg_ir_raw:");
-      Serial.println(ppg.getIR());
-      Serial.print(">ppg_red_raw:");
-      Serial.println(ppg.getRed());
-      ppg.nextSample();
-    }
-
-    // ===== 3. Audio (I2S ~16kHz) =====
-    int32_t audioSample = 0;
-    size_t bytes_read = 0;
-    i2s_read(I2S_NUM_0, &audioSample, 4, &bytes_read, 0);
-    if (bytes_read > 0) {
-      Serial.print(">audio_raw:");
-      Serial.println(audioSample >> 14);
-    }
-
-    // Check if done
-    if (now - phaseStartTime >= SAMPLE_DURATION_MS) {
-      Serial.println("# ========================================");
-      Serial.println("# MEASUREMENT COMPLETE!");
-      Serial.println("# ========================================");
-      currentState = STATE_DONE;
-    }
-
-    // Small delay to control loop rate (~500Hz for ECG)
-    delay(2);
-  } break;
-
-  case STATE_DONE:
-    // Nothing - measurement finished
-    break;
   }
 
-  // Log runtime every second for FS calculation
-  static unsigned long lastSec = 0;
-  if (now - lastSec >= 1000 && currentState == STATE_MEASURING) {
-    lastSec = now;
-    Serial.print(">runtime_sec:");
-    Serial.println((now - phaseStartTime) / 1000);
+  if (measurementActive) {
+    unsigned long now = millis();
+
+    // 1. Read PPG samples from queue
+    PPGSample sample;
+    int ppgPrinted = 0;
+    while (xQueueReceive(ppgQueue, &sample, 0) == pdTRUE) {
+      Serial.print(">ppg_ir_raw:");
+      Serial.println(sample.ir);
+      Serial.print(">ppg_red_raw:");
+      Serial.println(sample.red);
+      ppgPrinted++;
+    }
+
+    // 2. Read ECG from buffer (limit to prevent Serial blocking)
+    int ecgPrinted = 0;
+    while (ecgPrinted < 50) {
+      int val = -1;
+      portENTER_CRITICAL(&timerMux);
+      if (ecgHead != ecgTail) {
+        val = ecgBuffer[ecgTail];
+        ecgTail = (ecgTail + 1) % ECG_BUFFER_SIZE;
+      }
+      portEXIT_CRITICAL(&timerMux);
+
+      if (val != -1) {
+        Serial.print(">ecg_raw:");
+        Serial.println(val);
+        ecgPrinted++;
+      } else {
+        break;
+      }
+    }
+
+    // 3. Log Runtime + PPG rate debug
+    if (now - lastLog >= 1000) {
+      uint32_t ppgDelta = ppgSampleCount - lastPPGCount;
+      lastPPGCount = ppgSampleCount;
+
+      Serial.print(">runtime_sec:");
+      Serial.println((now - startTime) / 1000);
+      Serial.print("# PPG Rate: ");
+      Serial.print(ppgDelta);
+      Serial.println(" Hz");
+
+      lastLog = now;
+    }
+
+    // Check Done
+    if (now - startTime > SAMPLE_DURATION_MS) {
+      measurementActive = false;
+      Serial.println("# DONE.");
+    }
   }
 }

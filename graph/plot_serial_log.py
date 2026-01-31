@@ -11,17 +11,13 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import numpy as np
 
-# ============================================
 # CẤU HÌNH - THAY ĐỔI ĐƯỜNG DẪN TẠI ĐÂY
-# ============================================
 LOG_FILE_PATH = r"c:\Users\Admin\Documents\PlatformIO\Projects\VXL_20251\data_logs\serial_log_20260114_161919.txt"
 
 # Thư mục lưu ảnh output (mặc định là cùng folder với script)
 OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ============================================
 # HÀM PARSE DỮ LIỆU
-# ============================================
 
 def parse_serial_log(file_path):
     """
@@ -288,9 +284,7 @@ def print_statistics(data):
             print(f"  • Std: {arr.std():.2f}")
 
 
-# ============================================
 # MAIN
-# ============================================
 if __name__ == "__main__":
     print("="*60)
     print("🔬 SERIAL LOG GRAPH PLOTTER")

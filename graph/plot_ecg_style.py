@@ -15,9 +15,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 
-# ============================================
 # CẤU HÌNH
-# ============================================
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data_logs")
 OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 
