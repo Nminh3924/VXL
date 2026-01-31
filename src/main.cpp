@@ -1,4 +1,4 @@
-#include "MAX30105.h" // Sử dụng thư viện MAX3010x của SparkFun
+#include "MAX30105.h"
 #include "config.h"
 #include <Arduino.h>
 #include <driver/i2s.h>
@@ -7,17 +7,13 @@
 MAX30105 ppg;
 
 // --- CONFIGURATION ---
-// 3 minutes per phase = 180000 ms
-#define SAMPLE_DURATION_MS 180000
+// Total measurement time: 30 seconds (adjustable)
+#define SAMPLE_DURATION_MS 30000
 
 // --- STATES ---
 enum State {
   STATE_IDLE,
-  STATE_ECG_MEASURE,
-  STATE_WAIT_PPG,
-  STATE_PPG_MEASURE,
-  STATE_WAIT_AUDIO,
-  STATE_AUDIO_MEASURE,
+  STATE_MEASURING, // Đo tất cả cùng lúc!
   STATE_DONE
 };
 
@@ -26,18 +22,18 @@ unsigned long phaseStartTime = 0;
 
 // --- I2S CONFIG (INMP441) ---
 void initI2S() {
-  i2s_config_t i2s_config = {
-      .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-      .sample_rate = 16000, // 16kHz typical for voice/heart sound
-      .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-      .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-      .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-      .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-      .dma_buf_count = 8,
-      .dma_buf_len = 64,
-      .use_apll = false,
-      .tx_desc_auto_clear = false,
-      .fixed_mclk = 0};
+  i2s_config_t i2s_config = {.mode =
+                                 (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+                             .sample_rate = 16000,
+                             .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
+                             .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+                             .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+                             .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+                             .dma_buf_count = 8,
+                             .dma_buf_len = 64,
+                             .use_apll = false,
+                             .tx_desc_auto_clear = false,
+                             .fixed_mclk = 0};
 
   i2s_pin_config_t pin_config = {.bck_io_num = INMP441_SCK_PIN,
                                  .ws_io_num = INMP441_WS_PIN,
@@ -55,28 +51,27 @@ bool initPPG() {
     return false;
   }
   // Setup: ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth,
-  // adcRange Mode 2: Red + IR
-  ppg.setup(0x1F, 4, 2, 400, 411, 4096);
+  // adcRange Mode 2: Red + IR, 100Hz sample rate
+  ppg.setup(0x1F, 4, 2, 100, 411, 4096);
   return true;
 }
 
 void setup() {
-  Serial.begin(921600); // Stable High Speed
+  Serial.begin(115200);
 
-  // 1. PIN CONFIG
+  // PIN CONFIG
   pinMode(AD8232_LO_PLUS_PIN, INPUT);
   pinMode(AD8232_LO_MINUS_PIN, INPUT);
 
-  // 2. INIT SENSORS
-  // ECG (Analog) - No init needed
-  // PPG (I2C)
+  // INIT SENSORS
   if (!initPPG()) {
     Serial.println("# Error: MAX30102 Init Failed!");
   }
-  // Audio (I2S)
   initI2S();
 
-  Serial.println("# System Ready. Send 's' or ENTER to start ECG.");
+  Serial.println("# System Ready - SIMULTANEOUS MODE");
+  Serial.println(
+      "# Send 's' or ENTER to start measuring ECG + PPG + Audio together.");
 }
 
 void loop() {
@@ -85,45 +80,30 @@ void loop() {
   switch (currentState) {
   case STATE_IDLE:
     if (Serial.available() > 0) {
-      // Consume all input
       while (Serial.available())
         Serial.read();
 
-      Serial.println("# STARTING PHASE 1: ECG (3 Minutes)");
-      currentState = STATE_ECG_MEASURE;
+      Serial.println("# ========================================");
+      Serial.println("# STARTING: ECG + PPG + AUDIO (Simultaneous)");
+      Serial.print("# Duration: ");
+      Serial.print(SAMPLE_DURATION_MS / 1000);
+      Serial.println(" seconds");
+      Serial.println("# ========================================");
+
+      currentState = STATE_MEASURING;
       phaseStartTime = now;
     }
     break;
 
-  case STATE_ECG_MEASURE: {
-    // Measure ECG ~ 500Hz
+  case STATE_MEASURING: {
+    // ===== 1. ECG (Analog ~500Hz) =====
     int ecgVal = analogRead(AD8232_OUTPUT_PIN);
     Serial.print(">ecg_raw:");
     Serial.println(ecgVal);
 
-    // Check Timer
-    if (now - phaseStartTime >= SAMPLE_DURATION_MS) {
-      Serial.println("# DONE_ECG. PAUSED.");
-      Serial.println("# Please adjust sensor for PPG.");
-      Serial.println("# Press ENTER to start PHASE 2: PPG.");
-      currentState = STATE_WAIT_PPG;
-    }
-    delay(2); // ~500Hz
-  } break;
-
-  case STATE_WAIT_PPG:
-    if (Serial.available() > 0) {
-      while (Serial.available())
-        Serial.read();
-      Serial.println("# STARTING PHASE 2: PPG (3 Minutes)");
-      currentState = STATE_PPG_MEASURE;
-      phaseStartTime = now;
-    }
-    break;
-
-  case STATE_PPG_MEASURE: {
+    // ===== 2. PPG (I2C ~100Hz) =====
     ppg.check();
-    while (ppg.available()) {
+    if (ppg.available()) {
       Serial.print(">ppg_ir_raw:");
       Serial.println(ppg.getIR());
       Serial.print(">ppg_red_raw:");
@@ -131,53 +111,37 @@ void loop() {
       ppg.nextSample();
     }
 
-    if (now - phaseStartTime >= SAMPLE_DURATION_MS) {
-      Serial.println("# DONE_PPG. PAUSED.");
-      Serial.println("# Please quiet down for AUDIO.");
-      Serial.println("# Press ENTER to start PHASE 3: AUDIO.");
-      currentState = STATE_WAIT_AUDIO;
-    }
-  } break;
-
-  case STATE_WAIT_AUDIO:
-    if (Serial.available() > 0) {
-      while (Serial.available())
-        Serial.read();
-      Serial.println("# STARTING PHASE 3: AUDIO (3 Minutes)");
-      currentState = STATE_AUDIO_MEASURE;
-      phaseStartTime = now;
-    }
-    break;
-
-  case STATE_AUDIO_MEASURE: {
-    int32_t sample = 0;
+    // ===== 3. Audio (I2S ~16kHz) =====
+    int32_t audioSample = 0;
     size_t bytes_read = 0;
-    i2s_read(I2S_NUM_0, &sample, 4, &bytes_read, 0); // Non-blocking
+    i2s_read(I2S_NUM_0, &audioSample, 4, &bytes_read, 0);
     if (bytes_read > 0) {
       Serial.print(">audio_raw:");
-      Serial.println(sample >> 14);
+      Serial.println(audioSample >> 14);
     }
 
+    // Check if done
     if (now - phaseStartTime >= SAMPLE_DURATION_MS) {
-      Serial.println("# DONE_AUDIO. SESSION COMPLETE.");
+      Serial.println("# ========================================");
+      Serial.println("# MEASUREMENT COMPLETE!");
+      Serial.println("# ========================================");
       currentState = STATE_DONE;
     }
+
+    // Small delay to control loop rate (~500Hz for ECG)
+    delay(2);
   } break;
 
   case STATE_DONE:
-    // Do nothing
+    // Nothing - measurement finished
     break;
   }
 
-  // Log runtime roughly every second for FS calculation (Only in active states)
+  // Log runtime every second for FS calculation
   static unsigned long lastSec = 0;
-  if (now - lastSec >= 1000) {
+  if (now - lastSec >= 1000 && currentState == STATE_MEASURING) {
     lastSec = now;
-    if (currentState == STATE_ECG_MEASURE ||
-        currentState == STATE_PPG_MEASURE ||
-        currentState == STATE_AUDIO_MEASURE) {
-      Serial.print(">runtime_sec:");
-      Serial.println((now - phaseStartTime) / 1000);
-    }
+    Serial.print(">runtime_sec:");
+    Serial.println((now - phaseStartTime) / 1000);
   }
 }
