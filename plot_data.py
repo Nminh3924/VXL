@@ -27,10 +27,13 @@ def parse_log_file(filepath):
             line = line.strip()
             if line.startswith('#') or not line:
                 continue
-            if line.startswith('>'):
                 match = re.match(r'>(\w+):(-?[\d.]+)', line)
                 if match:
                     name = match.group(1)
+                    # Map sensor names if needed
+                    if name == 'audio':
+                        name = 'audio_raw'
+                        
                     try:
                         value = float(match.group(2))
                         if name in data:

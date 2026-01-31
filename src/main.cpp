@@ -1,177 +1,183 @@
-/*
- * ESP32 Raw Signal Collector
- * Chỉ thu thập dữ liệu thô từ: AD8232 (ECG), MAX30102 (PPG)
- * Output: Định dạng Teleplot (raw data only)
- * Lọc và xử lý tín hiệu sẽ thực hiện bằng Python
- *
- * TẦN SỐ: ECG 1000Hz sampling, PPG 1000Hz, Output 500Hz
- */
-
-#include "MAX30105.h"
+#include "MAX30105.h" // Sử dụng thư viện MAX3010x của SparkFun
 #include "config.h"
 #include <Arduino.h>
-#include <Wire.h>
+#include <driver/i2s.h>
 
-// Đối tượng cảm biến
-MAX30105 particleSensor;
+// --- OBJECTS ---
+MAX30105 ppg;
 
-// Timer cho ECG
-hw_timer_t *ecgTimer = NULL;
-volatile bool ecgSampleReady = false;
-volatile int rawECG = 0;
+// --- CONFIGURATION ---
+// 3 minutes per phase = 180000 ms
+#define SAMPLE_DURATION_MS 180000
 
-// Dữ liệu PPG
-long rawPPG_IR = 0;
-long rawPPG_Red = 0;
-bool max30102Initialized = false;
+// --- STATES ---
+enum State {
+  STATE_IDLE,
+  STATE_ECG_MEASURE,
+  STATE_WAIT_PPG,
+  STATE_PPG_MEASURE,
+  STATE_WAIT_AUDIO,
+  STATE_AUDIO_MEASURE,
+  STATE_DONE
+};
 
-// Bộ đếm output
-int outputCounter = 0;
-unsigned long startTime = 0;
-unsigned long lastDisplayTime = 0;
+State currentState = STATE_IDLE;
+unsigned long phaseStartTime = 0;
 
-// Tần số cấu hình
-#define ECG_SAMPLE_RATE 1000 // Hz - tần số lấy mẫu ECG
-#define PPG_SAMPLE_RATE 1000 // Hz - tần số lấy mẫu PPG
-#define OUTPUT_RATE 500      // Hz - tần số output ra serial
-#define ECG_DECIMATION (ECG_SAMPLE_RATE / OUTPUT_RATE) // = 2
-#define PPG_INTERVAL_US (1000000 / PPG_SAMPLE_RATE)    // = 1000us
+// --- I2S CONFIG (INMP441) ---
+void initI2S() {
+  i2s_config_t i2s_config = {
+      .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+      .sample_rate = 16000, // 16kHz typical for voice/heart sound
+      .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
+      .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+      .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+      .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+      .dma_buf_count = 8,
+      .dma_buf_len = 64,
+      .use_apll = false,
+      .tx_desc_auto_clear = false,
+      .fixed_mclk = 0};
 
-// Timer ISR - Lấy mẫu ECG 1000Hz
-void IRAM_ATTR onEcgTimer() {
-  rawECG = analogRead(AD8232_OUTPUT_PIN);
-  ecgSampleReady = true;
+  i2s_pin_config_t pin_config = {.bck_io_num = INMP441_SCK_PIN,
+                                 .ws_io_num = INMP441_WS_PIN,
+                                 .data_out_num = I2S_PIN_NO_CHANGE,
+                                 .data_in_num = INMP441_SD_PIN};
+
+  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_NUM_0, &pin_config);
+  i2s_zero_dma_buffer(I2S_NUM_0);
+}
+
+// --- PPG INIT ---
+bool initPPG() {
+  if (!ppg.begin(Wire, I2C_SPEED_FAST)) {
+    return false;
+  }
+  // Setup: ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth,
+  // adcRange Mode 2: Red + IR
+  ppg.setup(0x1F, 4, 2, 400, 411, 4096);
+  return true;
 }
 
 void setup() {
-  Serial.begin(SERIAL_BAUD_RATE);
-  delay(100);
+  Serial.begin(921600); // Stable High Speed
 
-  Serial.println("\n========================================");
-  Serial.println("ESP32 Raw Signal Collector v2.0");
-  Serial.println("ECG: AD8232 @ 1000Hz sampling, 500Hz output");
-  Serial.println("PPG: MAX30102 @ 1000Hz sampling, 500Hz output");
-  Serial.println("========================================");
-
-  // Cấu hình ADC
-  analogReadResolution(12);
-  analogSetAttenuation(ADC_11db);
-
-  // Cấu hình chân ECG
-  pinMode(AD8232_OUTPUT_PIN, INPUT);
+  // 1. PIN CONFIG
   pinMode(AD8232_LO_PLUS_PIN, INPUT);
   pinMode(AD8232_LO_MINUS_PIN, INPUT);
 
-  // Khởi tạo I2C cho MAX30102
-  Wire.begin(MAX30102_SDA_PIN, MAX30102_SCL_PIN);
-
-  // Khởi tạo MAX30102 với cấu hình tối ưu
-  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
-    Serial.println("[LOI] Khong tim thay MAX30102!");
-    max30102Initialized = false;
-  } else {
-    // Cấu hình MAX30102 cho 1000Hz
-    byte ledBrightness = 0x1F; // 31
-    byte sampleAverage = 1;    // Không average để đạt 1000Hz
-    byte ledMode = 2;          // Red + IR
-    int sampleRate = 1000;     // 1000Hz
-    int pulseWidth = 215;      // 215us - cân bằng giữa độ chính xác và tốc độ
-    int adcRange = 16384;      // 14-bit ADC
-
-    particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate,
-                         pulseWidth, adcRange);
-    particleSensor.setPulseAmplitudeRed(0x1F);
-    particleSensor.setPulseAmplitudeGreen(0);
-    max30102Initialized = true;
-    Serial.println("[OK] MAX30102 da khoi tao (14-bit, 1000Hz)");
+  // 2. INIT SENSORS
+  // ECG (Analog) - No init needed
+  // PPG (I2C)
+  if (!initPPG()) {
+    Serial.println("# Error: MAX30102 Init Failed!");
   }
+  // Audio (I2S)
+  initI2S();
 
-  // Thiết lập timer cho ECG (1000Hz)
-  ecgTimer = timerBegin(0, 80, true); // 80MHz / 80 = 1MHz
-  timerAttachInterrupt(ecgTimer, &onEcgTimer, true);
-  timerAlarmWrite(ecgTimer, 1000, true); // 1MHz / 1000 = 1000Hz
-  timerAlarmEnable(ecgTimer);
-
-  Serial.println("[OK] ECG Timer 1000Hz da bat dau");
-  Serial.println("========================================");
-  Serial.print("# Output rate: ");
-  Serial.print(OUTPUT_RATE);
-  Serial.println(" Hz");
-  Serial.println("# Format: >sensor:value");
-  Serial.println("========================================\n");
-
-  startTime = millis();
-  delay(500);
-}
-
-// Xử lý ECG - chỉ xuất raw data @ 500Hz output
-void processECG() {
-  if (!ecgSampleReady)
-    return;
-  ecgSampleReady = false;
-
-  // Kiểm tra lead-off
-  bool loPlus = digitalRead(AD8232_LO_PLUS_PIN);
-  bool loMinus = digitalRead(AD8232_LO_MINUS_PIN);
-
-  // Xuất dữ liệu mỗi ECG_DECIMATION lần (1000Hz / 2 = 500Hz output)
-  if (outputCounter % ECG_DECIMATION == 0) {
-    if (loPlus == 1 || loMinus == 1) {
-      // Lead-off - vẫn xuất để biết trạng thái
-      Serial.println(">ecg_raw:0");
-      Serial.println(">ecg_leadoff:1");
-    } else {
-      Serial.print(">ecg_raw:");
-      Serial.println(rawECG);
-    }
-  }
-}
-
-// Xử lý PPG - chỉ xuất raw data @ 500Hz output
-void processPPG() {
-  if (!max30102Initialized)
-    return;
-
-  // Lấy mẫu với tần số PPG_SAMPLE_RATE (1000Hz)
-  static unsigned long lastPPGSample = 0;
-  static int ppgCounter = 0;
-
-  if (micros() - lastPPGSample < PPG_INTERVAL_US) // 1000us = 1ms = 1000Hz
-    return;
-  lastPPGSample = micros();
-
-  rawPPG_IR = particleSensor.getIR();
-  rawPPG_Red = particleSensor.getRed();
-
-  // Xuất mỗi 2 lần để đạt 500Hz output
-  ppgCounter++;
-  if (ppgCounter >= 2) {
-    ppgCounter = 0;
-    Serial.print(">ppg_ir_raw:");
-    Serial.println(rawPPG_IR);
-    Serial.print(">ppg_red_raw:");
-    Serial.println(rawPPG_Red);
-  }
-}
-
-// Hiển thị thông tin mỗi giây
-void displayStatus() {
-  unsigned long currentTime = millis();
-
-  if (currentTime - lastDisplayTime >= 1000) {
-    lastDisplayTime = currentTime;
-
-    Serial.print(">runtime_sec:");
-    Serial.println((currentTime - startTime) / 1000);
-  }
+  Serial.println("# System Ready. Send 's' or ENTER to start ECG.");
 }
 
 void loop() {
-  processECG();
-  processPPG();
-  displayStatus();
+  unsigned long now = millis();
 
-  outputCounter++;
-  if (outputCounter >= 10000)
-    outputCounter = 0;
+  switch (currentState) {
+  case STATE_IDLE:
+    if (Serial.available() > 0) {
+      // Consume all input
+      while (Serial.available())
+        Serial.read();
+
+      Serial.println("# STARTING PHASE 1: ECG (3 Minutes)");
+      currentState = STATE_ECG_MEASURE;
+      phaseStartTime = now;
+    }
+    break;
+
+  case STATE_ECG_MEASURE: {
+    // Measure ECG ~ 500Hz
+    int ecgVal = analogRead(AD8232_OUTPUT_PIN);
+    Serial.print(">ecg_raw:");
+    Serial.println(ecgVal);
+
+    // Check Timer
+    if (now - phaseStartTime >= SAMPLE_DURATION_MS) {
+      Serial.println("# DONE_ECG. PAUSED.");
+      Serial.println("# Please adjust sensor for PPG.");
+      Serial.println("# Press ENTER to start PHASE 2: PPG.");
+      currentState = STATE_WAIT_PPG;
+    }
+    delay(2); // ~500Hz
+  } break;
+
+  case STATE_WAIT_PPG:
+    if (Serial.available() > 0) {
+      while (Serial.available())
+        Serial.read();
+      Serial.println("# STARTING PHASE 2: PPG (3 Minutes)");
+      currentState = STATE_PPG_MEASURE;
+      phaseStartTime = now;
+    }
+    break;
+
+  case STATE_PPG_MEASURE: {
+    ppg.check();
+    while (ppg.available()) {
+      Serial.print(">ppg_ir_raw:");
+      Serial.println(ppg.getIR());
+      Serial.print(">ppg_red_raw:");
+      Serial.println(ppg.getRed());
+      ppg.nextSample();
+    }
+
+    if (now - phaseStartTime >= SAMPLE_DURATION_MS) {
+      Serial.println("# DONE_PPG. PAUSED.");
+      Serial.println("# Please quiet down for AUDIO.");
+      Serial.println("# Press ENTER to start PHASE 3: AUDIO.");
+      currentState = STATE_WAIT_AUDIO;
+    }
+  } break;
+
+  case STATE_WAIT_AUDIO:
+    if (Serial.available() > 0) {
+      while (Serial.available())
+        Serial.read();
+      Serial.println("# STARTING PHASE 3: AUDIO (3 Minutes)");
+      currentState = STATE_AUDIO_MEASURE;
+      phaseStartTime = now;
+    }
+    break;
+
+  case STATE_AUDIO_MEASURE: {
+    int32_t sample = 0;
+    size_t bytes_read = 0;
+    i2s_read(I2S_NUM_0, &sample, 4, &bytes_read, 0); // Non-blocking
+    if (bytes_read > 0) {
+      Serial.print(">audio_raw:");
+      Serial.println(sample >> 14);
+    }
+
+    if (now - phaseStartTime >= SAMPLE_DURATION_MS) {
+      Serial.println("# DONE_AUDIO. SESSION COMPLETE.");
+      currentState = STATE_DONE;
+    }
+  } break;
+
+  case STATE_DONE:
+    // Do nothing
+    break;
+  }
+
+  // Log runtime roughly every second for FS calculation (Only in active states)
+  static unsigned long lastSec = 0;
+  if (now - lastSec >= 1000) {
+    lastSec = now;
+    if (currentState == STATE_ECG_MEASURE ||
+        currentState == STATE_PPG_MEASURE ||
+        currentState == STATE_AUDIO_MEASURE) {
+      Serial.print(">runtime_sec:");
+      Serial.println((now - phaseStartTime) / 1000);
+    }
+  }
 }

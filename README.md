@@ -78,9 +78,9 @@ pio device monitor
 ```
 Hoặc sử dụng **Teleplot** extension trong VSCode để vẽ biểu đồ real-time.
 
-### 3. Teleplot Setup
+3. Teleplot Setup
 1. Cài extension "Teleplot" trong VSCode
-2. Baud rate: **115200**
+2. Baud rate: **2000000**
 3. Kết nối ESP32 và mở Teleplot
 4. Các kênh sẽ tự động hiển thị
 

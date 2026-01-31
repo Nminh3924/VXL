@@ -59,7 +59,7 @@
 #define MAX30102_ADC_RANGE 4096
 
 // Cấu hình Serial
-#define SERIAL_BAUD_RATE 115200
+#define SERIAL_BAUD_RATE 2000000
 #define DISPLAY_INTERVAL_MS 1000
 
 #endif
