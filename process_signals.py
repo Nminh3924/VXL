@@ -36,9 +36,9 @@ except ImportError:
     print("[WARN] PyWavelets not installed. Wavelet denoising disabled.")
 
 # CẤU HÌNH
-DEFAULT_FS_ECG = 500      # Tần số lấy mẫu ECG (Hz)
+DEFAULT_FS_ECG = 1000     # Tần số lấy mẫu ECG (Hz)
 DEFAULT_FS_PPG = 100      # Tần số lấy mẫu PPG (Hz) - 400Hz internal / 4 avg
-DEFAULT_FS_AUDIO = 16000  # Tần số lấy mẫu Audio (Hz)
+DEFAULT_FS_AUDIO = 1000   # Tần số lấy mẫu Audio (Hz)
 OUTPUT_DIR = "processed_data"
 WINDOW_SEC = 30.0         # Cửa sổ hiển thị (giây)
 
@@ -388,19 +388,29 @@ def find_stable_segment(data, fs, window_sec):
 
 
 def create_plot(data, fs_config, output_file, window_sec=30.0):
-    """Tạo biểu đồ 3 hàng x 1 cột: Raw (Trái Axis) & Filtered (Phải Axis) chồng lên nhau"""
+    """Tạo biểu đồ 4 hàng: ECG, PPG Red, PPG IR, Audio"""
     
     ecg = data['ecg_raw']
     ppg_ir = data['ppg_ir_raw']
     ppg_red = data['ppg_red_raw']
+    audio = data['audio_raw']
     
     fs_ecg = fs_config.get('ecg', DEFAULT_FS_ECG)
     fs_ppg = fs_config.get('ppg', DEFAULT_FS_PPG)
+    fs_audio = fs_config.get('audio', 100)  # Audio logging rate
     
     # Xử lý tín hiệu
     ecg_clean = process_ecg(ecg, fs_ecg) if len(ecg) > 0 else np.array([])
     ppg_ir_clean = process_ppg(ppg_ir, fs_ppg) if len(ppg_ir) > 0 else np.array([])
     ppg_red_clean = process_ppg(ppg_red, fs_ppg) if len(ppg_red) > 0 else np.array([])
+    
+    # Simple audio processing: remove DC and normalize
+    audio_clean = np.array([])
+    if len(audio) > 0:
+        audio_clean = audio - np.mean(audio)  # Remove DC
+        audio_max = np.max(np.abs(audio_clean))
+        if audio_max > 0:
+            audio_clean = audio_clean / audio_max  # Normalize
     
     # Tìm đoạn ổn định nhất cho ECG
     if len(ecg_clean) > 0:
@@ -413,15 +423,11 @@ def create_plot(data, fs_config, output_file, window_sec=30.0):
     
     print(f"  [Best Window] ECG: {t_start:.1f}s - {t_end:.1f}s (best {window_sec}s)")
     
-    # Cắt ECG (Raw & Clean)
-    if len(ecg_clean) > 0:
-        ecg_view = ecg_clean[s_ecg:e_ecg]
-        ecg_raw_view = ecg[s_ecg:e_ecg]
-    else:
-        ecg_view = np.zeros(100)
-        ecg_raw_view = np.zeros(100)
+    # Cắt ECG
+    ecg_view = ecg_clean[s_ecg:e_ecg] if len(ecg_clean) > 0 else np.zeros(100)
+    ecg_raw_view = ecg[s_ecg:e_ecg] if len(ecg) > 0 else np.zeros(100)
     
-    # Cắt PPG (Raw & Clean)
+    # Cắt PPG
     s_ppg = int(t_start * fs_ppg)
     e_ppg = int(t_end * fs_ppg)
     
@@ -433,9 +439,14 @@ def create_plot(data, fs_config, output_file, window_sec=30.0):
 
     ppg_red_view = safe_slice(ppg_red_clean, s_ppg, e_ppg)
     ppg_ir_view = safe_slice(ppg_ir_clean, s_ppg, e_ppg)
-    
     ppg_red_raw_view = safe_slice(ppg_red, s_ppg, e_ppg)
     ppg_ir_raw_view = safe_slice(ppg_ir, s_ppg, e_ppg)
+    
+    # Cắt Audio
+    s_audio = int(t_start * fs_audio)
+    e_audio = int(t_end * fs_audio)
+    audio_view = safe_slice(audio_clean, s_audio, e_audio)
+    audio_raw_view = safe_slice(audio, s_audio, e_audio)
     
     # Tính HR
     peaks, hr = detect_r_peaks(ecg_view, fs_ecg)
@@ -443,9 +454,10 @@ def create_plot(data, fs_config, output_file, window_sec=30.0):
     # Tạo trục thời gian
     t_ecg = np.linspace(t_start, t_end, len(ecg_view))
     t_ppg = np.linspace(t_start, t_end, len(ppg_red_view))
+    t_audio = np.linspace(t_start, t_end, len(audio_view))
     
     # === PLOT 1: FILTERED ===
-    fig_filt, ax_filt = plt.subplots(3, 1, figsize=(14, 10))
+    fig_filt, ax_filt = plt.subplots(4, 1, figsize=(14, 12))
     
     # ECG Filtered
     ax_filt[0].plot(t_ecg, ecg_view, 'orange', linewidth=1, label='ECG Filtered')
@@ -461,17 +473,21 @@ def create_plot(data, fs_config, output_file, window_sec=30.0):
     ax_filt[1].set_title(f"PPG Red Filtered (660nm)", fontweight='bold')
     ax_filt[1].set_ylabel("Amplitude")
     ax_filt[1].grid(True, alpha=0.4)
+    ax_filt[1].invert_xaxis()
     
     # PPG IR Filtered
     ax_filt[2].plot(t_ppg, ppg_ir_view, 'green', linewidth=1)
     ax_filt[2].set_title(f"PPG IR Filtered (880nm)", fontweight='bold')
-    ax_filt[2].set_xlabel("Time (seconds)")
     ax_filt[2].set_ylabel("Amplitude")
     ax_filt[2].grid(True, alpha=0.4)
-    
-    # Filtered Plots: Invert X-axis ONLY for PPG (Index 1, 2) per user request
-    ax_filt[1].invert_xaxis()
     ax_filt[2].invert_xaxis()
+    
+    # Audio 
+    ax_filt[3].plot(t_audio, audio_view, 'blue', linewidth=0.5)
+    ax_filt[3].set_title(f"Audio (INMP441) | Samples: {len(audio)}", fontweight='bold')
+    ax_filt[3].set_xlabel("Time (seconds)")
+    ax_filt[3].set_ylabel("Amplitude")
+    ax_filt[3].grid(True, alpha=0.4)
 
     plt.tight_layout()
     file_filt = output_file.replace(".png", "_filtered.png")
@@ -480,7 +496,7 @@ def create_plot(data, fs_config, output_file, window_sec=30.0):
     plt.close(fig_filt)
 
     # === PLOT 2: RAW ===
-    fig_raw, ax_raw = plt.subplots(3, 1, figsize=(14, 10))
+    fig_raw, ax_raw = plt.subplots(4, 1, figsize=(14, 12))
     
     # ECG Raw
     ax_raw[0].plot(t_ecg, ecg_raw_view, 'gray', linewidth=1)
@@ -493,17 +509,21 @@ def create_plot(data, fs_config, output_file, window_sec=30.0):
     ax_raw[1].set_title(f"PPG Red Raw (Inverted ADC)", fontweight='bold')
     ax_raw[1].set_ylabel("Inverted ADC")
     ax_raw[1].grid(True, alpha=0.4)
+    ax_raw[1].invert_xaxis()
     
     # PPG IR Raw (Inverted)
     ax_raw[2].plot(t_ppg, -ppg_ir_raw_view, 'gray', linewidth=1)
     ax_raw[2].set_title(f"PPG IR Raw (Inverted ADC)", fontweight='bold')
-    ax_raw[2].set_xlabel("Time (seconds)")
     ax_raw[2].set_ylabel("Inverted ADC")
     ax_raw[2].grid(True, alpha=0.4)
-    
-    # Raw Plots: Invert X-axis ONLY for PPG (Index 1, 2)
-    ax_raw[1].invert_xaxis()
     ax_raw[2].invert_xaxis()
+    
+    # Audio Raw
+    ax_raw[3].plot(t_audio, audio_raw_view, 'gray', linewidth=0.5)
+    ax_raw[3].set_title(f"Audio Raw (INMP441)", fontweight='bold')
+    ax_raw[3].set_xlabel("Time (seconds)")
+    ax_raw[3].set_ylabel("Raw Value")
+    ax_raw[3].grid(True, alpha=0.4)
     
     plt.tight_layout()
     file_raw = output_file.replace(".png", "_raw.png")
@@ -536,7 +556,7 @@ def main():
     
     # Parse data
     data, estimated_fs = parse_log_file(log_file)
-    print(f"[INFO] Samples - ECG: {len(data['ecg_raw'])}, PPG IR: {len(data['ppg_ir_raw'])}, PPG Red: {len(data['ppg_red_raw'])}")
+    print(f"[INFO] Samples - ECG: {len(data['ecg_raw'])}, PPG IR: {len(data['ppg_ir_raw'])}, PPG Red: {len(data['ppg_red_raw'])}, Audio: {len(data['audio_raw'])}")
     
     # Configure sample rates
     fs_config = {
