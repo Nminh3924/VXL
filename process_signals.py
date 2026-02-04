@@ -36,11 +36,11 @@ except ImportError:
     print("[WARN] PyWavelets not installed. Wavelet denoising disabled.")
 
 # CẤU HÌNH
-DEFAULT_FS_ECG = 1000     # Tần số lấy mẫu ECG (Hz)
-DEFAULT_FS_PPG = 100      # Tần số lấy mẫu PPG (Hz) - 400Hz internal / 4 avg
-DEFAULT_FS_AUDIO = 1000   # Tần số lấy mẫu Audio (Hz)
+DEFAULT_FS_ECG = 1000    
+DEFAULT_FS_PPG = 100     
+DEFAULT_FS_AUDIO = 1000   
 OUTPUT_DIR = "processed_data"
-WINDOW_SEC = 30.0         # Cửa sổ hiển thị (giây)
+WINDOW_SEC = 10.0        
 
 # ĐỌC FILE LOG
 def parse_log_file(filepath):
@@ -233,16 +233,15 @@ def process_ecg(raw_data, fs):
     # Step 2: Light median filter
     cleaned = median_filter(cleaned, size=3)
     
-    # Step 3: Notch filter 50Hz - DISABLED to check signal distortion
-    # filtered = notch_filter(cleaned, 50.0, 30.0, fs)
+    # Step 3: Notch filter 50Hz
+   # filtered = notch_filter(cleaned, 50.0, 30.0, fs)
     filtered = cleaned
-    
     # Step 4: Bandpass 0.5-40Hz (Reduced order to minimize ringing)
     filtered = butter_bandpass(filtered, 0.5, 40.0, fs, order=2)
     
-    # Step 5: Wavelet denoise (optional) - DISABLED to preserve R-peak amplitude
-    # if HAS_PYWT:
-    #     filtered = wavelet_denoise(filtered, 'db6', 4)
+    # Step 5: Wavelet denoise (optional)
+    #if HAS_PYWT:
+     #   filtered = wavelet_denoise(filtered, 'db6', 4)
     
     return filtered
 
@@ -334,6 +333,34 @@ def process_ppg(raw_data, fs):
     # We want peaks to represent pulsation (high blood volume)
     return -smoothed
 
+def calculate_spo2(red_raw, red_clean, ir_raw, ir_clean):
+    """
+    Tính SpO2 từ tín hiệu PPG Red và IR (Ratio of Ratios).
+    AC được tính từ tín hiệu đã lọc (STD), DC được tính từ tín hiệu thô (MEAN).
+    """
+    if len(red_raw) < 10 or len(ir_raw) < 10:
+        return 0.0
+    
+    # DC: Giá trị trung bình của tín hiệu thô
+    dc_red = np.mean(red_raw)
+    dc_ir = np.mean(ir_raw)
+    
+    # AC: Standard deviation của tín hiệu đã qua lọc
+    ac_red = np.std(red_clean)
+    ac_ir = np.std(ir_clean)
+    
+    if dc_red > 100 and dc_ir > 100 and ac_ir > 0:
+        # Tỷ số R
+        R = (ac_red / dc_red) / (ac_ir / dc_ir)
+        
+        # Công thức thực nghiệm (MAX30102 chuẩn)
+        spo2 = 110 - 25 * R
+        
+        # Giới hạn thực tế
+        return max(50.0, min(100.0, spo2))
+    
+    return 0.0
+
 # TÌM ĐỈNH R VÀ TÍNH NHỊP TIM
 def detect_r_peaks(ecg, fs):
     """Tìm đỉnh R trong ECG và tính heart rate"""
@@ -354,6 +381,31 @@ def detect_r_peaks(ecg, fs):
         avg_interval = np.mean(intervals)
         hr = 60.0 * fs / avg_interval
     
+    return peaks, hr
+
+def detect_ppg_peaks(ppg, fs):
+    """
+    Phát hiện đỉnh systolic và tính nhịp tim từ PPG
+    Thận trọng hơn ECG để tránh dicrotic notch.
+    """
+    if len(ppg) < 100:
+        return [], 0
+        
+    # Normalize Min-Max
+    ppg_norm = (ppg - np.min(ppg)) / (np.max(ppg) - np.min(ppg) + 1e-6)
+    
+    # Distance lớn hơn (0.4s) để né nhiễu dội
+    min_dist = int(0.4 * fs)
+    
+    # Prominence thấp hơn (0.2) do biên độ PPG biến thiên
+    peaks, _ = signal.find_peaks(ppg_norm, distance=min_dist, prominence=0.2)
+    
+    hr = 0
+    if len(peaks) > 1:
+        intervals = np.diff(peaks)
+        avg_interval_sec = np.mean(intervals) / fs
+        hr = 60.0 / avg_interval_sec
+        
     return peaks, hr
 
 # TÌM ĐOẠN ỔN ĐỊNH NHẤT
@@ -449,7 +501,11 @@ def create_plot(data, fs_config, output_file, window_sec=30.0):
     audio_raw_view = safe_slice(audio, s_audio, e_audio)
     
     # Tính HR
-    peaks, hr = detect_r_peaks(ecg_view, fs_ecg)
+    ecg_peaks, ecg_hr = detect_r_peaks(ecg_view, fs_ecg)
+    ppg_peaks, ppg_hr = detect_ppg_peaks(ppg_red_view, fs_ppg)
+    
+    # Tính SpO2 (Sử dụng đoạn tín hiệu hiển thị)
+    spo2_val = calculate_spo2(ppg_red_raw_view, ppg_red_view, ppg_ir_raw_view, ppg_ir_view)
     
     # Tạo trục thời gian
     t_ecg = np.linspace(t_start, t_end, len(ecg_view))
@@ -461,26 +517,28 @@ def create_plot(data, fs_config, output_file, window_sec=30.0):
     
     # ECG Filtered
     ax_filt[0].plot(t_ecg, ecg_view, 'orange', linewidth=1, label='ECG Filtered')
-    if len(peaks) > 0:
-        ax_filt[0].plot(t_ecg[peaks], ecg_view[peaks], 'r+', markersize=10, label='R-peaks')
-    ax_filt[0].set_title(f"ECG Filtered | Heart Rate: {hr:.0f} BPM", fontweight='bold')
+    if len(ecg_peaks) > 0:
+        ax_filt[0].plot(t_ecg[ecg_peaks], ecg_view[ecg_peaks], 'r+', markersize=10, label='R-peaks')
+    ax_filt[0].set_title(f"ECG Filtered | Heart Rate: {ecg_hr:.0f} BPM", fontweight='bold')
     ax_filt[0].set_ylabel("Amplitude")
     ax_filt[0].legend(loc='upper right')
     ax_filt[0].grid(True, alpha=0.4)
     
     # PPG Red Filtered
     ax_filt[1].plot(t_ppg, ppg_red_view, 'red', linewidth=1)
-    ax_filt[1].set_title(f"PPG Red Filtered (660nm)", fontweight='bold')
+    if len(ppg_peaks) > 0:
+        ax_filt[1].plot(t_ppg[ppg_peaks], ppg_red_view[ppg_peaks], 'b*', markersize=8, label='Peaks')
+    ax_filt[1].set_title(f"PPG Red Filtered (660nm) | HR: {ppg_hr:.0f} BPM | SpO2: {spo2_val:.1f}%", fontweight='bold')
     ax_filt[1].set_ylabel("Amplitude")
     ax_filt[1].grid(True, alpha=0.4)
-    ax_filt[1].invert_xaxis()
+    # ax_filt[1].invert_xaxis() # Removed inversion in plot display to match detect_r_peaks logic
     
     # PPG IR Filtered
     ax_filt[2].plot(t_ppg, ppg_ir_view, 'green', linewidth=1)
-    ax_filt[2].set_title(f"PPG IR Filtered (880nm)", fontweight='bold')
+    ax_filt[2].set_title(f"PPG IR Filtered (880nm) | SpO2 Estimate: {spo2_val:.1f}%", fontweight='bold')
     ax_filt[2].set_ylabel("Amplitude")
     ax_filt[2].grid(True, alpha=0.4)
-    ax_filt[2].invert_xaxis()
+    # ax_filt[2].invert_xaxis()
     
     # Audio 
     ax_filt[3].plot(t_audio, audio_view, 'blue', linewidth=0.5)
