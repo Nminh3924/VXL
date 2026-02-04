@@ -1,119 +1,117 @@
 # ESP32 Physiological Signal Acquisition System
 
-Hệ thống thu thập tín hiệu sinh lý sử dụng ESP32 Dev Kit V1 với các cảm biến:
+Hệ thống thu thập **đồng thời** tín hiệu sinh lý sử dụng ESP32 Dev Kit V1:
 - **AD8232** - ECG (Điện tâm đồ)
 - **MAX30102** - PPG (SpO2 và nhịp tim)
-- **INMP441** - Microphone I2S
+- **INMP441** - Microphone I2S (PCG / Tiếng tim)
 
-## Tính năng
+## Kiến trúc phần mềm
 
-### Lấy mẫu
-- ECG: 1000Hz (timer interrupt)
-- PPG: 1000Hz
-- Audio: 16000Hz (I2S)
+Firmware sử dụng **FreeRTOS** để thu thập dữ liệu song song:
 
-### Xử lý tín hiệu
-- **DC Blocker**: Loại bỏ DC offset
-- **Notch 50Hz + 100Hz**: Loại nhiễu điện lưới (IIR, Q=30)
-- **Bandpass [1-100Hz]**: Butterworth 2nd order
-- **Wavelet Denoising**: Haar wavelet với soft thresholding
+| Tín hiệu | Phương thức | Core | Tốc độ lấy mẫu | Tốc độ output |
+|----------|-------------|------|----------------|---------------|
+| **ECG** | Timer ISR | 1 | 1000 Hz | ~1000 Hz |
+| **PPG** | FreeRTOS Task | 0 | 1600 Hz (sensor) | ~40 Hz (sau avg) |
+| **Audio** | FreeRTOS Task | 0 | 16000 Hz (I2S) | ~100 Hz (sau avg) |
 
-### Output (Teleplot compatible)
-```
->ecg_raw:value
->ecg_filtered:value
->ecg_wavelet:value
->ppg_ir_raw:value
->ppg_ir_filtered:value
->ppg_ir_wavelet:value
->audio_raw:value
->audio_filtered:value
->heartrate:value
->spo2:value
-```
+### Luồng dữ liệu
+1. **ECG**: Timer interrupt đọc ADC → Ring Buffer → Main loop xuất Serial
+2. **PPG**: Task đọc MAX30102 → Queue → Main loop xuất Serial
+3. **Audio**: Task đọc I2S → Trung bình hóa → Queue → Main loop xuất Serial
 
 ## Kết nối phần cứng
 
 ### AD8232 (ECG)
-| AD8232 Pin | ESP32 Pin |
-|------------|-----------|
-| OUTPUT     | GPIO36    |
-| LO+        | GPIO25    |
-| LO-        | GPIO26    |
-| 3.3V       | 3.3V      |
-| GND        | GND       |
+| AD8232 | ESP32 |
+|--------|-------|
+| OUTPUT | GPIO36 |
+| LO+ | GPIO25 |
+| LO- | GPIO26 |
+| 3.3V | 3.3V |
+| GND | GND |
 
-### MAX30102 (PPG)
-| MAX30102 Pin | ESP32 Pin |
-|--------------|-----------|
-| SDA          | GPIO21    |
-| SCL          | GPIO22    |
-| 3.3V         | 3.3V      |
-| GND          | GND       |
+### MAX30102 (PPG - I2C)
+| MAX30102 | ESP32 |
+|----------|-------|
+| SDA | GPIO21 |
+| SCL | GPIO22 |
+| 3.3V | 3.3V |
+| GND | GND |
 
-### INMP441 (Microphone)
-| INMP441 Pin | ESP32 Pin |
-|-------------|-----------|
-| WS          | GPIO32    |
-| SCK         | GPIO33    |
-| SD          | GPIO35    |
-| VDD         | 3.3V      |
-| GND         | GND       |
-| L/R         | GND (Left channel) |
+### INMP441 (Microphone - I2S)
+| INMP441 | ESP32 |
+|---------|-------|
+| WS | GPIO32 |
+| SCK | GPIO33 |
+| SD | GPIO35 |
+| VDD | 3.3V |
+| GND | GND |
+| L/R | GND (Left) hoặc 3.3V (Right) |
 
 ## Cách sử dụng
 
 ### 1. Build và Upload
 ```bash
-# Build
-pio run
-
-# Upload
-pio run --target upload
+pio run -t upload
 ```
 
-### 2. Mở Serial Monitor
+### 2. Thu thập dữ liệu
 ```bash
-pio device monitor
+python serial_logger.py
 ```
-Hoặc sử dụng **Teleplot** extension trong VSCode để vẽ biểu đồ real-time.
+- Chọn cổng COM
+- Bấm **ENTER** để bắt đầu đo (3 phút)
+- Dữ liệu lưu vào `data_logs/serial_log_*.txt`
 
-3. Teleplot Setup
-1. Cài extension "Teleplot" trong VSCode
-2. Baud rate: **2000000**
-3. Kết nối ESP32 và mở Teleplot
-4. Các kênh sẽ tự động hiển thị
-
-## Cấu trúc file
-
+### 3. Xử lý và vẽ đồ thị
+```bash
+python process_signals.py data_logs/serial_log_XXXXXXXX_XXXXXX.txt
 ```
-include/
-├── config.h      # GPIO pins, sampling rates, filter params
-├── filters.h     # IIR filters (Notch, Bandpass, DC Blocker)
-├── wavelet.h     # Haar wavelet denoising
-└── inmp441.h     # I2S microphone driver
+- Kết quả: `processed_data/result_*.png`
 
-src/
-└── main.cpp      # Main application
+## Định dạng Output (Teleplot compatible)
+```
+>ecg_raw:value
+>ppg_ir_raw:value
+>ppg_red_raw:value
+>audio_raw:value
+>runtime_sec:seconds
 ```
 
-## Thay đổi cấu hình
+## Cấu hình
 
-Chỉnh sửa file `include/config.h`:
-
+### Firmware (`src/main.cpp`)
 ```cpp
-// Sampling rates
-#define ECG_SAMPLE_RATE     1000    // Hz
-#define PPG_SAMPLE_RATE     1000    // Hz
-#define AUDIO_SAMPLE_RATE   16000   // Hz
-
-// Filter parameters  
-#define NOTCH_Q_FACTOR      30.0f   // Higher = narrower notch
-#define BANDPASS_LOW_FREQ   1.0f    // Hz
-#define BANDPASS_HIGH_FREQ  100.0f  // Hz
-
-// Wavelet
-#define WAVELET_DECOMPOSITION_LEVEL  3
-#define WAVELET_THRESHOLD_MULTIPLIER 1.5f
+#define SERIAL_BAUD 460800          // Baud rate
+#define SAMPLE_DURATION_MS 180000   // 3 phút
 ```
 
+### Logger (`serial_logger.py`)
+```python
+BAUD_RATE = 460800
+```
+
+## Cấu trúc thư mục
+```
+VXL_20251/
+├── src/main.cpp           # Firmware chính
+├── include/config.h       # Cấu hình GPIO
+├── serial_logger.py       # Ghi dữ liệu từ Serial
+├── process_signals.py     # Xử lý tín hiệu & vẽ đồ thị
+├── data_logs/             # File log thô
+└── processed_data/        # Ảnh kết quả
+```
+
+## Xử lý tín hiệu (Python)
+
+| Tín hiệu | Xử lý |
+|----------|-------|
+| **ECG** | Notch 50Hz → Bandpass 0.5-40Hz → Wavelet db6 → R-peak detection |
+| **PPG** | Invert → Bandpass 0.5-5Hz → Wavelet sym8 |
+| **Audio** | Bandpass 25-400Hz |
+
+## Lưu ý
+- ECG hiển thị 4095 liên tục = Điện cực chưa tiếp xúc tốt (Lead-Off)
+- PPG = 0 = Ngón tay chưa đặt đúng vị trí
+- Audio cần môi trường yên tĩnh để thu tiếng tim rõ

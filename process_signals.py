@@ -408,7 +408,7 @@ def detect_ppg_peaks(ppg, fs):
         
     return peaks, hr
 
-# TÌM ĐOẠN ỔN ĐỊNH NHẤT
+
 def find_stable_segment(data, fs, window_sec):
     """Tìm đoạn tín hiệu ổn định nhất trong data"""
     N = len(data)

@@ -4,48 +4,46 @@
 #include <Wire.h>
 #include <driver/i2s.h>
 
-// --- OBJECTS ---
+// --- ĐỐI TƯỢNG (OBJECTS) ---
 MAX30105 ppg;
 hw_timer_t *timer = NULL;
-portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED; // Khóa spinlock cho ngắt
 
-// --- CONFIGURATION ---
-#define SERIAL_BAUD 460800
-#define SAMPLE_DURATION_MS 180000
-#define ECG_BUFFER_SIZE 512
-#define PPG_QUEUE_SIZE 512
-#define AUDIO_QUEUE_SIZE 256
-#define AUDIO_SAMPLE_INTERVAL_MS 1 // 1000Hz audio sampling for logging
+// --- CẤU HÌNH (CONFIGURATION) ---
+#define SERIAL_BAUD 460800 // Tốc độ truyền Serial cao để tránh nghẽn dữ liệu
+#define SAMPLE_DURATION_MS 180000 // Thời gian đo tối đa 3 phút (180s)
+#define ECG_BUFFER_SIZE 512       // Kích thước bộ đệm vòng cho ECG
+#define PPG_QUEUE_SIZE 512        // Kích thước hàng đợi PPG
+#define AUDIO_QUEUE_SIZE 256      // Kích thước hàng đợi Audio
 
 // --- FreeRTOS ---
 TaskHandle_t ppgTaskHandle = NULL;
-QueueHandle_t ppgQueue = NULL;
-QueueHandle_t audioQueue = NULL;
+QueueHandle_t ppgQueue = NULL;   // Hàng đợi chứa dữ liệu PPG từ Task -> Loop
+QueueHandle_t audioQueue = NULL; // Hàng đợi chứa dữ liệu Audio từ Task -> Loop
 
-// PPG Data Structure
+// Cấu trúc dữ liệu PPG
 struct PPGSample {
   uint32_t ir;
   uint32_t red;
 };
 
-// --- SHARED DATA ---
+// --- BIẾN DÙNG CHUNG (SHARED DATA) ---
 volatile int ecgBuffer[ECG_BUFFER_SIZE];
 volatile int ecgHead = 0;
 volatile int ecgTail = 0;
-volatile bool measurementActive = false;
+volatile bool measurementActive = false; // Cờ báo hiệu trạng thái đo
 
-// Debug counters
+// Các biến đếm để debug tốc độ lấy mẫu
 volatile uint32_t ppgSampleCount = 0;
 volatile uint32_t audioSampleCount = 0;
 
-// --- I2S AUDIO SETUP ---
+// --- CẤU HÌNH I2S AUDIO ---
 void initI2S() {
   i2s_config_t i2s_config = {
       .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-      .sample_rate = 16000,
+      .sample_rate = 16000, // Tốc độ lấy mẫu phần cứng: 16kHz
       .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-      .channel_format =
-          I2S_CHANNEL_FMT_ONLY_RIGHT, // Try RIGHT channel if LEFT is silent
+      .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT, // Chỉ dùng kênh phải
       .communication_format = I2S_COMM_FORMAT_STAND_I2S,
       .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
       .dma_buf_count = 4,
@@ -64,14 +62,15 @@ void initI2S() {
   i2s_zero_dma_buffer(I2S_NUM_0);
 }
 
-// --- ISR: TIMER INTERRUPT (500Hz) for ECG ---
+// --- NGẮT TIMER (ISR) CHO ECG --- Tần số gọi: 1000Hz (Mỗi 1ms một lần)
 void IRAM_ATTR onTimer() {
   if (measurementActive) {
     int val = analogRead(AD8232_OUTPUT_PIN);
 
+    // Vào vùng tới hạn (Critical Section) để ghi buffer an toàn
     portENTER_CRITICAL_ISR(&timerMux);
     int nextHead = (ecgHead + 1) % ECG_BUFFER_SIZE;
-    if (nextHead != ecgTail) {
+    if (nextHead != ecgTail) { // Nếu buffer chưa đầy
       ecgBuffer[ecgHead] = val;
       ecgHead = nextHead;
     }
@@ -79,50 +78,55 @@ void IRAM_ATTR onTimer() {
   }
 }
 
-// --- PPG TASK (runs on Core 0) ---
+// --- TÁC VỤ PPG (Chạy trên Core 0) ---
 void ppgTask(void *pvParameters) {
-  Serial.println("# PPG Task started on Core 0");
+  Serial.println("# PPG Task đã bắt đầu trên Core 0");
 
   while (true) {
     if (measurementActive) {
-      ppg.check();
+      ppg.check(); // Kiểm tra dữ liệu mới từ cảm biến
 
       while (ppg.available()) {
         PPGSample sample;
         sample.ir = ppg.getIR();
         sample.red = ppg.getRed();
-        ppg.nextSample();
+        ppg.nextSample(); // Chuyển sang mẫu tiếp theo trong FIFO
         ppgSampleCount++;
 
+        // Gửi dữ liệu vào Queue (không chờ nếu đầy)
         xQueueSend(ppgQueue, &sample, 0);
       }
 
-      taskYIELD();
+      taskYIELD(); // Nhường CPU cho các tác vụ khác (quan trọng!)
     } else {
-      vTaskDelay(pdMS_TO_TICKS(50));
+      vTaskDelay(pdMS_TO_TICKS(50)); // Nếu không đo, ngủ 50ms
     }
   }
 }
 
-// --- AUDIO TASK (runs on Core 0) ---
+// --- TÁC VỤ AUDIO (Chạy trên Core 0) ---
 void audioTask(void *pvParameters) {
-  Serial.println("# Audio Task started on Core 0");
+  Serial.println("# Audio Task đã bắt đầu trên Core 0");
 
   int32_t audioBuffer[64];
   size_t bytesRead;
 
   while (true) {
     if (measurementActive) {
-      // Read audio samples from I2S
+      // 1. Đọc 64 mẫu từ I2S (Hàm này BLOCKING - sẽ chờ đủ 64 mẫu mới chạy
+      // tiếp)
+      //    Với Fs=16000Hz, thời gian chờ là 64/16000 = 0.004s (4ms)
+      //    => Tốc độ vòng lặp tự nhiên là ~250Hz.
       i2s_read(I2S_NUM_0, audioBuffer, sizeof(audioBuffer), &bytesRead,
                portMAX_DELAY);
 
       if (bytesRead > 0) {
-        // Average the samples and send to queue (reduces data rate)
+        // 2. Tính trung bình (Downsampling) để giảm dữ liệu
         int32_t sum = 0;
-        int numSamples = bytesRead / 4;
+        int numSamples = bytesRead / 4; // Mỗi mẫu I2S là 4 bytes
         for (int i = 0; i < numSamples; i++) {
-          sum += (audioBuffer[i] >> 14); // Scale down 32-bit to usable range
+          sum += (audioBuffer[i] >>
+                  14); // Dịch bit để giảm biên độ từ 32-bit về mức vừa phải
         }
         int32_t avgSample = sum / numSamples;
 
@@ -130,9 +134,11 @@ void audioTask(void *pvParameters) {
         audioSampleCount++;
       }
 
-      vTaskDelay(pdMS_TO_TICKS(AUDIO_SAMPLE_INTERVAL_MS));
+      // Đã xoá vTaskDelay(1) ở đây để Tốc độ đạt tối đa theo phần cứng (250Hz)
+      // Không cần delay thêm vì i2s_read đã tự động chờ (blocking) rồi.
+
     } else {
-      vTaskDelay(pdMS_TO_TICKS(100));
+      vTaskDelay(pdMS_TO_TICKS(100)); // Nghỉ lâu hơn khi không đo
     }
   }
 }
@@ -143,70 +149,65 @@ void setup() {
   pinMode(AD8232_LO_PLUS_PIN, INPUT);
   pinMode(AD8232_LO_MINUS_PIN, INPUT);
 
-  // Init MAX30102
+  // Khởi tạo MAX30102
   Wire.begin();
-  Wire.setClock(400000);
 
   if (!ppg.begin(Wire, I2C_SPEED_FAST)) {
-    Serial.println("# Error: MAX30102 Init Failed!");
+    Serial.println("# Lỗi: Không thể khởi tạo MAX30102!");
   } else {
+    // Cấu hình: độ sáng led, mẫu trung bình, mode, sample rate, độ rộng
+    // xung,dải ADC
     ppg.setup(0x1F, 1, 2, 1600, 411, 16384);
-    Serial.println("# MAX30102 OK: 1600Hz/1avg");
+    Serial.println("# MAX30102 OK:");
   }
 
-  // Init I2S Audio
+  // Khởi tạo I2S Audio
   initI2S();
-  Serial.println("# INMP441 Audio OK: 16kHz");
+  Serial.println("# INMP441 Audio OK:");
 
-  // Create Queues
+  // Tạo các hàng đợi (Queue)
   ppgQueue = xQueueCreate(PPG_QUEUE_SIZE, sizeof(PPGSample));
   audioQueue = xQueueCreate(AUDIO_QUEUE_SIZE, sizeof(int32_t));
 
-  // Create PPG Task on Core 0
+  // Tạo tác vụ PPG (Core 0, ưu tiên cao hơn chút)
   xTaskCreatePinnedToCore(ppgTask, "PPG_Task", 4096, NULL,
                           configMAX_PRIORITIES - 1, &ppgTaskHandle, 0);
 
-  // Create Audio Task on Core 0
+  // Tạo tác vụ Audio (Core 0, ưu tiên thấp hơn)
   xTaskCreatePinnedToCore(audioTask, "Audio_Task", 4096, NULL,
                           configMAX_PRIORITIES - 2, NULL, 0);
 
-  // Init Timer (500Hz) for ECG
-  timer = timerBegin(0, 80, true);
-  timerAttachInterrupt(timer, &onTimer, true);
-  timerAlarmWrite(timer, 1000, true); // 1000Hz
+  // Khởi tạo Timer cho ECG (500Hz -> Sửa thành 1000Hz)
+  timer = timerBegin(0, 80, true);             // Timer 0, div 80 (1MHz tick)
+  timerAttachInterrupt(timer, &onTimer, true); // Gán hàm ngắt onTimer
+  timerAlarmWrite(timer, 1000, true); // Ngắt mỗi 1000 ticks (1ms) -> 1000Hz
   timerAlarmEnable(timer);
 
-  Serial.println("# READY: ECG@500Hz, PPG@~40Hz, Audio@100Hz");
-  Serial.println("# Press ENTER to start.");
+  Serial.println("# SẴN SÀNG: ECG@1000Hz, PPG@~160Hz, Audio@250Hz");
+
+  // TỰ ĐỘNG BẮT ĐẦU ĐO
+  Serial.println("# TỰ ĐỘNG BẮT ĐẦU ĐO...");
+  ecgHead = 0;
+  ecgTail = 0;
+  ppgSampleCount = 0;
+  audioSampleCount = 0;
+  xQueueReset(ppgQueue);
+  xQueueReset(audioQueue);
+  measurementActive = true;
 }
 
 void loop() {
-  static unsigned long startTime = 0;
+  static unsigned long startTime = millis();
   static unsigned long lastLog = 0;
   static uint32_t lastPPGCount = 0;
   static uint32_t lastAudioCount = 0;
 
-  // CMD Handling
-  if (Serial.available()) {
-    while (Serial.available())
-      Serial.read();
-    if (!measurementActive) {
-      Serial.println("# STARTING...");
-      startTime = millis();
-      ecgHead = 0;
-      ecgTail = 0;
-      ppgSampleCount = 0;
-      audioSampleCount = 0;
-      xQueueReset(ppgQueue);
-      xQueueReset(audioQueue);
-      measurementActive = true;
-    }
-  }
+  // Đã xóa phần kiểm tra Serial.available() để tự động chạy
 
   if (measurementActive) {
     unsigned long now = millis();
 
-    // 1. Read PPG samples from queue
+    // 1. Đọc dữ liệu PPG từ Queue và in ra
     PPGSample sample;
     while (xQueueReceive(ppgQueue, &sample, 0) == pdTRUE) {
       Serial.print(">ppg_ir_raw:");
@@ -215,18 +216,18 @@ void loop() {
       Serial.println(sample.red);
     }
 
-    // 2. Read Audio samples from queue
+    // 2. Đọc dữ liệu Audio từ Queue và in ra
     int32_t audioSample;
     while (xQueueReceive(audioQueue, &audioSample, 0) == pdTRUE) {
       Serial.print(">audio_raw:");
       Serial.println(audioSample);
     }
 
-    // 3. Read ECG from buffer
+    // 3. Đọc dữ liệu ECG từ Buffer vòng và in ra
     int ecgPrinted = 0;
-    while (ecgPrinted < 50) {
+    while (ecgPrinted < 50) { // Giới hạn số lượng in mỗi vòng lặp để tránh treo
       int val = -1;
-      portENTER_CRITICAL(&timerMux);
+      portENTER_CRITICAL(&timerMux); // Khóa ngắt để đọc an toàn
       if (ecgHead != ecgTail) {
         val = ecgBuffer[ecgTail];
         ecgTail = (ecgTail + 1) % ECG_BUFFER_SIZE;
@@ -238,11 +239,11 @@ void loop() {
         Serial.println(val);
         ecgPrinted++;
       } else {
-        break;
+        break; // Hết dữ liệu
       }
     }
 
-    // 4. Log Runtime + rates
+    // 4. Log thời gian chạy và tốc độ lấy mẫu (Mỗi 1 giây)
     if (now - lastLog >= 1000) {
       uint32_t ppgDelta = ppgSampleCount - lastPPGCount;
       uint32_t audioDelta = audioSampleCount - lastAudioCount;
@@ -251,7 +252,7 @@ void loop() {
 
       Serial.print(">runtime_sec:");
       Serial.println((now - startTime) / 1000);
-      Serial.print("# Rates: PPG=");
+      Serial.print("# Tốc độ thực tế: PPG=");
       Serial.print(ppgDelta);
       Serial.print("Hz, Audio=");
       Serial.print(audioDelta);
@@ -260,10 +261,10 @@ void loop() {
       lastLog = now;
     }
 
-    // Check Done
+    // Kiểm tra thời gian đo, dừng nếu quá hạn
     if (now - startTime > SAMPLE_DURATION_MS) {
       measurementActive = false;
-      Serial.println("# DONE.");
+      Serial.println("# ĐÃ XONG.");
     }
   }
 }

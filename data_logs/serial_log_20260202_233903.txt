@@ -1,7 +1,7 @@
 # Log Start: 2026-02-02 23:39:04.262927
 # STARTING...
 >runtime_sec:0
-# Rates: PPG=0Hz, Audio=0Hz
+# Rates: ECG=0Hz, PPG=0Hz, Audio=0Hz
 >ecg_raw:1975
 >ecg_raw:2030
 >ecg_raw:2056
@@ -1553,7 +1553,7 @@
 >ecg_raw:1963
 >ecg_raw:2016
 >runtime_sec:1
-# Rates: PPG=152Hz, Audio=252Hz
+# Rates: ECG=993Hz, PPG=152Hz, Audio=252Hz
 >ppg_ir_raw:23449
 >ppg_red_raw:22566
 >ecg_raw:2078
@@ -3127,7 +3127,7 @@
 >ecg_raw:1984
 >audio_raw:812
 >runtime_sec:2
-# Rates: PPG=160Hz, Audio=252Hz
+# Rates: ECG=1000Hz, PPG=160Hz, Audio=252Hz
 >ecg_raw:1993
 >ecg_raw:1990
 >ecg_raw:1999
@@ -4695,7 +4695,7 @@
 >ecg_raw:1857
 >ecg_raw:1844
 >runtime_sec:3
-# Rates: PPG=159Hz, Audio=248Hz
+# Rates: ECG=1000Hz, PPG=159Hz, Audio=248Hz
 >ppg_ir_raw:25937
 >ppg_red_raw:24714
 >ecg_raw:1811
@@ -6269,7 +6269,7 @@
 >ecg_raw:1924
 >audio_raw:256
 >runtime_sec:4
-# Rates: PPG=160Hz, Audio=252Hz
+# Rates: ECG=1000Hz, PPG=160Hz, Audio=252Hz
 >ecg_raw:1881
 >ecg_raw:1895
 >ecg_raw:1846
@@ -7837,7 +7837,7 @@
 >ecg_raw:1644
 >ecg_raw:1616
 >runtime_sec:5
-# Rates: PPG=159Hz, Audio=248Hz
+# Rates: ECG=1000Hz, PPG=159Hz, Audio=248Hz
 >ecg_raw:1600
 >ecg_raw:1593
 >ecg_raw:1586
@@ -9411,7 +9411,7 @@
 >ecg_raw:2090
 >audio_raw:-81
 >runtime_sec:6
-# Rates: PPG=160Hz, Audio=252Hz
+# Rates: ECG=1000Hz, PPG=160Hz, Audio=252Hz
 >ecg_raw:2099
 >ecg_raw:2090
 >ecg_raw:2135
@@ -10979,7 +10979,7 @@
 >ecg_raw:1808
 >ecg_raw:1831
 >runtime_sec:7
-# Rates: PPG=159Hz, Audio=248Hz
+# Rates: ECG=1000Hz, PPG=159Hz, Audio=248Hz
 >ecg_raw:1849
 >ecg_raw:1873
 >ecg_raw:1877
@@ -12547,7 +12547,7 @@
 >ecg_raw:2029
 >audio_raw:-373
 >runtime_sec:8
-# Rates: PPG=159Hz, Audio=252Hz
+# Rates: ECG=997Hz, PPG=159Hz, Audio=252Hz
 >ecg_raw:2038
 >ecg_raw:2040
 >ppg_ir_raw:25910
@@ -14112,7 +14112,7 @@
 >ecg_raw:1802
 >ecg_raw:1790
 >runtime_sec:9
-# Rates: PPG=160Hz, Audio=248Hz
+# Rates: ECG=996Hz, PPG=160Hz, Audio=248Hz
 >ecg_raw:1785
 >ecg_raw:1776
 >ecg_raw:1771
@@ -15672,7 +15672,7 @@
 >ecg_raw:2002
 >audio_raw:587
 >runtime_sec:10
-# Rates: PPG=159Hz, Audio=252Hz
+# Rates: ECG=989Hz, PPG=159Hz, Audio=252Hz
 >ecg_raw:2004
 >ecg_raw:2000
 >ppg_ir_raw:26039
@@ -17228,7 +17228,7 @@
 >ecg_raw:1872
 >ecg_raw:1858
 >runtime_sec:11
-# Rates: PPG=159Hz, Audio=248Hz
+# Rates: ECG=993Hz, PPG=159Hz, Audio=248Hz
 >ecg_raw:1850
 >ppg_ir_raw:26014
 >ppg_red_raw:24525
@@ -18802,7 +18802,7 @@
 >ecg_raw:1736
 >audio_raw:597
 >runtime_sec:12
-# Rates: PPG=160Hz, Audio=252Hz
+# Rates: ECG=1000Hz, PPG=160Hz, Audio=252Hz
 >ecg_raw:1741
 >ecg_raw:1728
 >ecg_raw:1729
@@ -20369,7 +20369,7 @@ w:148
 >ecg_raw:1807
 >ecg_raw:1811
 >runtime_sec:13
-# Rates: PPG=159Hz, Audio=248Hz
+# Rates: ECG=999Hz, PPG=159Hz, Audio=248Hz
 >ecg_raw:1871
 >ppg_ir_raw:26417
 >ppg_red_raw:24746
@@ -21940,7 +21940,7 @@ w:148
 >ecg_raw:1699
 >audio_raw:490
 >runtime_sec:14
-# Rates: PPG=159Hz, Audio=252Hz
+# Rates: ECG=1000Hz, PPG=159Hz, Audio=252Hz
 >ppg_ir_raw:26228
 >ppg_red_raw:24643
 >ecg_raw:1489
@@ -23496,7 +23496,7 @@ w:148
 >ecg_raw:2465
 >ecg_raw:2662
 >runtime_sec:15
-# Rates: PPG=160Hz, Audio=248Hz
+# Rates: ECG=990Hz, PPG=160Hz, Audio=248Hz
 >ecg_raw:2919
 >ecg_raw:3135
 >ecg_raw:3447
@@ -25068,7 +25068,7 @@ w:148
 >ecg_raw:1841
 >audio_raw:-508
 >runtime_sec:16
-# Rates: PPG=159Hz, Audio=252Hz
+# Rates: ECG=1000Hz, PPG=159Hz, Audio=252Hz
 >ecg_raw:1841
 >ppg_ir_raw:26157
 >ppg_red_raw:24629
@@ -26634,7 +26634,7 @@ w:148
 >ecg_raw:1695
 >ecg_raw:1696
 >runtime_sec:17
-# Rates: PPG=159Hz, Audio=248Hz
+# Rates: ECG=999Hz, PPG=159Hz, Audio=248Hz
 >ppg_ir_raw:26312
 >ppg_red_raw:24727
 >ecg_raw:1673
@@ -28208,7 +28208,7 @@ w:148
 >ecg_raw:1868
 >audio_raw:-2422
 >runtime_sec:18
-# Rates: PPG=160Hz, Audio=252Hz
+# Rates: ECG=1000Hz, PPG=160Hz, Audio=252Hz
 >ecg_raw:1810
 >ecg_raw:1771
 >ecg_raw:1795
@@ -29776,7 +29776,7 @@ w:148
 >ecg_raw:1786
 >ecg_raw:1761
 >runtime_sec:19
-# Rates: PPG=159Hz, Audio=248Hz
+# Rates: ECG=1000Hz, PPG=159Hz, Audio=248Hz
 >ppg_ir_raw:26397
 >ppg_red_raw:24752
 >ecg_raw:1766
@@ -31350,7 +31350,7 @@ w:148
 >ecg_raw:1776
 >audio_raw:-166
 >runtime_sec:20
-# Rates: PPG=160Hz, Audio=252Hz
+# Rates: ECG=1000Hz, PPG=160Hz, Audio=252Hz
 >ecg_raw:1925
 >ecg_raw:1815
 >ecg_raw:1840
@@ -32913,7 +32913,7 @@ w:148
 >ecg_raw:1933
 >ecg_raw:2014
 >runtime_sec:21
-# Rates: PPG=159Hz, Audio=248Hz
+# Rates: ECG=996Hz, PPG=159Hz, Audio=248Hz
 >ecg_raw:1965
 >ecg_raw:1989
 >ecg_raw:1960
@@ -34487,7 +34487,7 @@ w:148
 >ecg_raw:1879
 >audio_raw:893
 >runtime_sec:22
-# Rates: PPG=160Hz, Audio=252Hz
+# Rates: ECG=1000Hz, PPG=160Hz, Audio=252Hz
 >ecg_raw:1898
 >ecg_raw:1904
 >ecg_raw:1903
@@ -36055,7 +36055,7 @@ w:148
 >ecg_raw:1777
 >ecg_raw:1819
 >runtime_sec:23
-# Rates: PPG=159Hz, Audio=248Hz
+# Rates: ECG=1000Hz, PPG=159Hz, Audio=248Hz
 >ecg_raw:1783
 >ecg_raw:1773
 >ecg_raw:1754
@@ -37622,7 +37622,7 @@ w:148
 >ecg_raw:2253
 >audio_raw:-1342
 >runtime_sec:24
-# Rates: PPG=159Hz, Audio=252Hz
+# Rates: ECG=995Hz, PPG=159Hz, Audio=252Hz
 >ecg_raw:2401
 >ecg_raw:2559
 >ppg_ir_raw:26530
@@ -39192,7 +39192,7 @@ w:148
 >ppg_red_raw:24784
 >ecg_raw:1727
 >runtime_sec:25
-# Rates: PPG=160Hz, Audio=248Hz
+# Rates: ECG=1000Hz, PPG=160Hz, Audio=248Hz
 >ecg_raw:1727
 >ecg_raw:1702
 >ecg_raw:1681
@@ -40759,7 +40759,7 @@ ed_raw:24848
 >ecg_raw:1819
 >audio_raw:-248
 >runtime_sec:26
-# Rates: PPG=159Hz, Audio=252Hz
+# Rates: ECG=996Hz, PPG=159Hz, Audio=252Hz
 >ecg_raw:1786
 >ecg_raw:1757
 >ppg_ir_raw:26814
